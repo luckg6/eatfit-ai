@@ -5,7 +5,7 @@ from datetime import datetime
 
 class MealLogBase(BaseModel):
     meal_type: str
-    meal_time: datetime
+    meal_time: Optional[datetime] = None  # Optional - defaults to now in API
     food_text: str
     scenario: Optional[str] = None
     estimated_calories: Optional[float] = None

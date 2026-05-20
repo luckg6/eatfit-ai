@@ -127,6 +127,8 @@ class SendMessageRequest(BaseModel):
     scenario: Optional[str] = "OTHER"
     is_training_day: bool = False
     session_id: Optional[int] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 
 class SendMessageResponse(BaseModel):
@@ -134,3 +136,13 @@ class SendMessageResponse(BaseModel):
     message_id: int
     response: AdviceResponse
     pending_meal_action: Optional[dict] = None
+
+
+class RestaurantDetailRequest(BaseModel):
+    uid: str
+    name: str
+    address: Optional[str] = None
+
+
+class RestaurantDetailResponse(BaseModel):
+    content: str

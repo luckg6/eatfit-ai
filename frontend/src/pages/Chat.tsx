@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { adviceAPI, mealsAPI, profileAPI, memoriesAPI } from '../api';
+import { adviceAPI, mealsAPI, profileAPI, memoriesAPI, authAPI } from '../api';
 import { ChatMessage, AgentStep } from '../types';
 import ChatMessageList from '../components/chat/ChatMessageList';
 import ChatInput from '../components/chat/ChatInput';
@@ -39,17 +39,43 @@ export default function Chat() {
   const [profile, setProfile] = useState<any>(null);
   const [agentTraceOpen, setAgentTraceOpen] = useState(false);
   const [traceSteps, setTraceSteps] = useState<AgentStep[]>([]);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     loadSessions();
     loadTodaySummary();
     loadProfile();
+    // 获取用户 GPS 位置
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          setUserLocation({
+            latitude: pos.coords.latitude,
+            longitude: pos.coords.longitude,
+          });
+        },
+        () => {}  // 拒绝或失败静默忽略
+      );
+    }
   }, []);
 
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as Element;
+      if (!target.closest('.user-menu')) {
+        setUserMenuOpen(false);
+      }
+    };
+    document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, [userMenuOpen]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -156,6 +182,8 @@ export default function Chat() {
         scenario,
         is_training_day: isTrainingDay,
         session_id: currentSessionId || undefined,
+        latitude: userLocation?.latitude,
+        longitude: userLocation?.longitude,
       });
 
       // Process SSE stream
@@ -297,11 +325,12 @@ export default function Chat() {
       await mealsAPI.create({
         meal_type: msg.action.data.meal_type || 'SNACK',
         food_text: msg.action.data.food_text || '',
+        meal_time: msg.action.data.meal_time || null,  // Pass parsed meal_time
         scenario: msg.action.data.scenario || scenario,
         estimated_calories: msg.action.data.estimated_calories || 0,
-        estimated_protein: 0,
-        estimated_carbs: 0,
-        estimated_fat: 0,
+        estimated_protein: msg.action.data.estimated_protein || 0,
+        estimated_carbs: msg.action.data.estimated_carbs || 0,
+        estimated_fat: msg.action.data.estimated_fat || 0,
         sleep_impact: 'NONE',
       });
 
@@ -405,6 +434,41 @@ export default function Chat() {
     }
   };
 
+  const handleSelectRestaurant = async (messageId: string, restaurant: any) => {
+    // Send message to agent loop with restaurant UID, so the agent can get details directly without re-searching
+    const detailQuery = `帮我查看餐厅"${restaurant.name}"(UID:${restaurant.uid})的详细信息，分析是否符合我的饮食目标`;
+    await handleSend(detailQuery);
+
+    // Update message status to 'confirmed'
+    if (currentSessionId && messageId && !messageId.startsWith('temp') && !messageId.startsWith('error') && !messageId.startsWith('loading')) {
+      try {
+        await adviceAPI.updateMessage(currentSessionId, parseInt(messageId), {
+          action_status: 'confirmed',
+        });
+      } catch (e) {
+        console.error('Failed to update restaurant message status', e);
+      }
+    }
+
+    setMessages(prev =>
+      prev.map(m =>
+        m.id === messageId
+          ? { ...m, action: { ...m.action!, status: 'confirmed' } }
+          : m
+      )
+    );
+  };
+
+  const handleCancelRestaurant = (messageId: string) => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === messageId
+          ? { ...m, action: { ...m.action!, status: 'cancelled' } }
+          : m
+      )
+    );
+  };
+
   const formatSessionDate = (dateStr: string) => {
     const date = new Date(dateStr);
     const now = new Date();
@@ -442,6 +506,17 @@ export default function Chat() {
       setSessions(prevSessions);
       console.error('Failed to delete session', err);
     }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await authAPI.logout();
+    } catch (e) {
+      // Ignore backend errors, still logout locally
+    }
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    window.location.href = '/login';
   };
 
   return (
@@ -503,8 +578,11 @@ export default function Chat() {
         </div>
 
         {/* User info at bottom */}
-        <div className={`p-4 border-t ${theme === 'dark' ? 'border-gray-700' : 'border-gray-200'} flex-shrink-0`}>
-          <div className="flex items-center gap-3">
+        <div className={`p-4 border-t ${theme === 'dark' ? 'border-gray-700' : 'border-gray-200'} flex-shrink-0 relative user-menu`}>
+          <div
+            className="flex items-center gap-3 cursor-pointer hover:opacity-80 transition-opacity"
+            onClick={() => setUserMenuOpen(!userMenuOpen)}
+          >
             <div className="w-8 h-8 rounded-full bg-primary-600 flex items-center justify-center text-white text-sm font-medium">
               {profile?.nickname?.slice(0, 1) || 'U'}
             </div>
@@ -512,7 +590,24 @@ export default function Chat() {
               <p className={`text-sm truncate font-medium ${theme === 'dark' ? 'text-gray-200' : 'text-gray-800'}`}>{profile?.nickname || '用户'}</p>
               <p className={`text-xs truncate ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`}>{profile?.primary_goal || ''}</p>
             </div>
+            <svg className={`w-4 h-4 transition-transform ${userMenuOpen ? 'rotate-180' : ''} ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
           </div>
+
+          {userMenuOpen && (
+            <div className={`absolute bottom-full left-0 right-0 mb-1 py-1 rounded-lg shadow-lg ${theme === 'dark' ? 'bg-gray-700 border border-gray-600' : 'bg-white border border-gray-200'}`}>
+              <button
+                onClick={handleLogout}
+                className={`w-full flex items-center gap-2 px-4 py-2 text-sm text-left hover:bg-opacity-80 transition-colors ${theme === 'dark' ? 'text-gray-200 hover:bg-gray-600' : 'text-gray-700 hover:bg-gray-100'}`}
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+                退出登录
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -616,6 +711,8 @@ export default function Chat() {
               onCancelProfileUpdate={handleCancelMeal}
               onConfirmMemory={handleConfirmMemory}
               onCancelMemory={handleCancelMeal}
+              onSelectRestaurant={handleSelectRestaurant}
+              onCancelRestaurant={handleCancelRestaurant}
               theme={theme}
             />
           )}

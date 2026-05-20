@@ -157,7 +157,7 @@ export interface TrainingRecord {
 // Chat types
 export type ChatRole = 'user' | 'assistant';
 
-export type ActionType = 'meal_log' | 'profile_update' | 'memory_confirm' | 'restaurant_recommendation';
+export type ActionType = 'meal_log' | 'profile_update' | 'memory_confirm' | 'restaurant_select' | 'restaurant_recommendation';
 
 export interface ChatAction {
   type: ActionType;
@@ -165,6 +165,7 @@ export interface ChatAction {
     // meal_log
     food_text?: string;
     meal_type?: string;
+    meal_time?: string;  // ISO datetime string
     estimated_calories?: number;
     estimated_protein?: number;
     estimated_carbs?: number;
@@ -201,4 +202,30 @@ export interface AgentStep {
   step: string;
   data: Record<string, any>;
   timestamp: string;
+}
+
+// Restaurant types
+export interface Restaurant {
+  name: string;
+  address: string;
+  tag?: string;
+  rating?: number;
+  uid: string;
+  location?: {
+    lat: number;
+    lng: number;
+  };
+  telephone?: string;
+  price_level?: number;
+  detail_url?: string;
+}
+
+export interface RestaurantSearchResult {
+  restaurants: Restaurant[];
+  search_params: {
+    query: string;
+    region?: string;
+    location?: string;
+    radius: number;
+  };
 }

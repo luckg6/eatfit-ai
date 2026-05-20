@@ -3,6 +3,7 @@ import { ChatMessage } from '../../types';
 import MealLogConfirmCard from './MealLogConfirmCard';
 import ProfileUpdateConfirmCard from './ProfileUpdateConfirmCard';
 import MemoryConfirmCard from './MemoryConfirmCard';
+import RestaurantConfirmCard from './RestaurantConfirmCard';
 
 interface ChatMessageListProps {
   messages: ChatMessage[];
@@ -12,6 +13,8 @@ interface ChatMessageListProps {
   onCancelProfileUpdate?: (messageId: string) => void;
   onConfirmMemory?: (messageId: string) => void;
   onCancelMemory?: (messageId: string) => void;
+  onSelectRestaurant?: (messageId: string, restaurant: any) => void;
+  onCancelRestaurant?: (messageId: string) => void;
   theme?: 'light' | 'dark';
 }
 
@@ -23,6 +26,8 @@ export default function ChatMessageList({
   onCancelProfileUpdate,
   onConfirmMemory,
   onCancelMemory,
+  onSelectRestaurant,
+  onCancelRestaurant,
   theme = 'dark',
 }: ChatMessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -115,6 +120,15 @@ export default function ChatMessageList({
               memoryAction={msg.action.data}
               onConfirm={() => onConfirmMemory(msg.id)}
               onCancel={() => onCancelMemory?.(msg.id)}
+              theme={theme}
+            />
+          )}
+
+          {msg.action?.type === 'restaurant_select' && msg.action.status === 'pending' && msg.action.data.restaurants && (
+            <RestaurantConfirmCard
+              restaurants={msg.action.data.restaurants}
+              onSelect={(restaurant) => onSelectRestaurant?.(msg.id, restaurant)}
+              onCancel={() => onCancelRestaurant?.(msg.id)}
               theme={theme}
             />
           )}

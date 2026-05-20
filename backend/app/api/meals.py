@@ -18,10 +18,15 @@ def create_meal(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    # Handle meal_time - default to now if not provided
+    meal_time = meal_data.meal_time
+    if meal_time is None:
+        meal_time = datetime.now()
+
     meal = MealLog(
         user_id=current_user.id,
         meal_type=meal_data.meal_type,
-        meal_time=meal_data.meal_time,
+        meal_time=meal_time,
         food_text=meal_data.food_text,
         scenario=meal_data.scenario,
         estimated_calories=meal_data.estimated_calories,

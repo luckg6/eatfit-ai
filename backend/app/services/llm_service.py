@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import json
 
 from app.core.config import settings
@@ -22,9 +22,15 @@ class BaseLLMService:
     def _clean_json_response(self, response: str) -> str:
         """Clean JSON response from LLM output."""
         import re
+        original_response = response
         response = response.strip()
+        logger.info(f"[CleanJSON] Original length={len(original_response)}, preview='{original_response[:300]}...'")
+
         # Remove <think> ...  thinking tags first (handles MiniMax-style output)
-        response = re.sub(r'<think>.*?', '', response, flags=re.DOTALL)
+        # Be more aggressive - remove ALL <think>...</think> blocks anywhere
+        response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL)
+        logger.info(f"[CleanJSON] After thinking removal, length={len(response)}, preview='{response[:300]}...'")
+
         # Remove ```json ... ``` or ``` ... ``` code blocks
         if response.startswith("```json"):
             response = response[7:]
@@ -32,15 +38,61 @@ class BaseLLMService:
             response = response[3:]
         if response.endswith("```"):
             response = response[:-3]
-        # Find the first JSON object/array start AFTER all think tags (skip any { inside think blocks)
-        # Look for the last ]] or the actual JSON start after the think block
-        json_start = response.find('[{')
-        if json_start < 0:
-            json_start = response.find('{"')
-        if json_start < 0:
-            # Fallback: find first { after last newline or at start
-            json_start = max(0, response.find('['))
-        response = response[json_start:]
+        logger.info(f"[CleanJSON] After code block removal, length={len(response)}, preview='{response[:300]}...'")
+
+        response = response.strip()
+
+        # Find first '{' to locate start of JSON
+        first_brace = response.find('{')
+        if first_brace < 0:
+            logger.info(f"[CleanJSON] No brace found, returning stripped response")
+            return response
+
+        # Track brace count, but SKIP braces inside string literals
+        brace_count = 0
+        json_end = -1
+        in_string = False
+        escape_next = False
+
+        for i in range(first_brace, len(response)):
+            char = response[i]
+
+            if escape_next:
+                escape_next = False
+                continue
+
+            if char == '\\' and in_string:
+                escape_next = True
+                continue
+
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                continue
+
+            if in_string:
+                continue
+
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    json_end = i + 1
+                    break
+
+        if json_end > first_brace:
+            response = response[first_brace:json_end]
+            logger.info(f"[CleanJSON] Found complete JSON at [{first_brace}:{json_end}], final length={len(response)}, preview='{response[:200]}...'")
+        else:
+            # Fallback: find last brace (original behavior)
+            last_brace = response.rfind('}')
+            if last_brace > first_brace:
+                response = response[first_brace:last_brace + 1]
+                logger.info(f"[CleanJSON] Fallback to [{first_brace}:{last_brace+1}], final length={len(response)}")
+            else:
+                logger.warning(f"[CleanJSON] Could not find complete JSON object, first_brace={first_brace}, last_brace={last_brace}, returning from first_brace")
+                response = response[first_brace:]
+
         return response.strip()
 
 
@@ -64,6 +116,39 @@ class MockLLMService(BaseLLMService):
             return self._get_mock_weekly_review()
         else:
             return self._get_default_mock_response(user_prompt)
+
+    async def generate_from_history(self, messages: List[Dict[str, str]]) -> str:
+        """
+        Generate response given conversation history.
+        messages: list of {"role": "system"|"user"|"assistant", "content": str}
+        """
+        # Find the last user message
+        last_user_msg = None
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                last_user_msg = msg.get("content", "")
+                break
+
+        if not last_user_msg:
+            return json.dumps({"response_type": "direct", "data": {"one_sentence_summary": "没有找到用户消息"}})
+
+        # Check if it's a restaurant search request
+        last_user_lower = last_user_msg.lower()
+        if any(k in last_user_lower for k in ["附近有什么", "有什么餐厅", "附近美食", "搜索餐厅", "找餐厅"]):
+            return json.dumps({
+                "response_type": "tool_call",
+                "tool_name": "search_restaurants",
+                "tool_args": {
+                    "query": "美食",
+                    "region": "成都",
+                    "radius": 2000,
+                    "limit": 5
+                },
+                "continue": False
+            })
+
+        # Default: direct response
+        return self._get_mock_diet_advice(last_user_msg)
 
     def _get_mock_diet_advice(self, user_prompt: str) -> str:
         """Return mock diet advice response."""
@@ -242,6 +327,35 @@ class RealLLMService(BaseLLMService):
 
     async def generate(self, system_prompt: str, user_prompt: str) -> str:
         """Generate text using OpenAI-compatible API."""
+        return await self._generate([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ])
+
+    async def generate_from_history(self, messages: List[Dict[str, str]]) -> str:
+        """
+        Generate response given conversation history.
+        messages: list of {"role": "system"|"user"|"assistant", "content": str}
+        """
+        # MiniMax API doesn't accept "system" role - convert to "user" role
+        processed_messages = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            if role == "system":
+                # Convert system message to user message (MiniMax compatibility)
+                processed_messages.append({"role": "user", "content": f"[System] {msg.get('content', '')}"})
+            else:
+                processed_messages.append(msg)
+
+        # Truncate if history too long (keep system + last ~6 messages)
+        MAX_MESSAGES = 8
+        if len(processed_messages) > MAX_MESSAGES:
+            processed_messages = [processed_messages[0]] + processed_messages[-(MAX_MESSAGES - 1):]
+            logger.warning(f"[RealLLMService] Truncated history to {MAX_MESSAGES} messages")
+        return await self._generate(processed_messages)
+
+    async def _generate(self, messages: List[Dict[str, str]]) -> str:
+        """Generate text using OpenAI-compatible API."""
         import httpx
 
         headers = {
@@ -251,14 +365,15 @@ class RealLLMService(BaseLLMService):
 
         payload = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "temperature": 0.7
+            "messages": messages,
+            "temperature": 0.3,
+            "max_tokens": 4000
         }
 
-        raw_content = None
+        # Log payload stats for debugging
+        total_chars = sum(len(m.get("content", "")) for m in messages)
+        logger.info(f"[RealLLMService] Sending {len(messages)} messages, total chars={total_chars}, max_tokens=4000")
+
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
@@ -266,17 +381,29 @@ class RealLLMService(BaseLLMService):
                     headers=headers,
                     json=payload
                 )
-                response.raise_for_status()
+                # Check for HTTP errors BEFORE trying to parse JSON
+                if response.status_code != 200:
+                    error_body = response.text
+                    logger.error(f"[RealLLMService] HTTP {response.status_code} error response: {error_body[:1000]}")
+                    response.raise_for_status()
                 data = response.json()
                 raw_content = data["choices"][0]["message"]["content"]
                 logger.info(f"[RealLLMService] Raw model response:\n{raw_content}\n---")
                 cleaned = self._clean_json_response(raw_content)
-                logger.info(f"[RealLLMService] Response cleaned, length={len(cleaned)}, preview='{cleaned[:150]}...'")
+                logger.info(f"[RealLLMService] Response cleaned, length={len(cleaned)}, preview='{cleaned[:300]}...'")
                 return cleaned
+        except httpx.HTTPStatusError as e:
+            # HTTP error - try to capture response body for diagnostics
+            error_body = None
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_body = e.response.text
+                except Exception:
+                    error_body = str(e.response)
+            logger.error(f"[RealLLMService] HTTP status error: {e}, response body: {error_body[:500] if error_body else 'None'}")
+            raise  # Re-raise so caller can handle
         except Exception as e:
             logger.error(f"[RealLLMService] LLM API error: {e}")
-            if raw_content:
-                logger.error(f"[RealLLMService] Raw content was: {raw_content[:500]}")
             return json.dumps({
                 "situation_summary": "用户在寻求饮食建议，当前场景是外食。",
                 "goal_analysis": "根据用户情况，建议选择高蛋白、低油脂的食物组合。",

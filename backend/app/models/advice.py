@@ -14,6 +14,8 @@ class AdviceSession(Base):
     ai_response_json = Column(JSON)
     scenario = Column(String(64), default="OTHER")
     is_training_day = Column(BigInteger, default=0)
+    # Stores restaurant search results for the session (used when user selects a restaurant)
+    restaurant_context = Column(JSON, default=dict)
     created_at = Column(DateTime, nullable=False, default=func.now())
     updated_at = Column(DateTime, nullable=False, default=func.now(), onupdate=func.now())
 

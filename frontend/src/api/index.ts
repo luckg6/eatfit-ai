@@ -77,9 +77,9 @@ export const adviceAPI = {
     api.post('/advice/daily-plan', { is_training_day }),
   generateWeeklyReview: () => api.post('/advice/weekly-review'),
   // New chat API
-  sendMessage: (data: { message: string; scenario?: string; is_training_day?: boolean; session_id?: number }) =>
+  sendMessage: (data: { message: string; scenario?: string; is_training_day?: boolean; session_id?: number; latitude?: number; longitude?: number }) =>
     api.post('/advice/send', data),
-  sendMessageStream: (data: { message: string; scenario?: string; is_training_day?: boolean; session_id?: number }) => {
+  sendMessageStream: (data: { message: string; scenario?: string; is_training_day?: boolean; session_id?: number; latitude?: number; longitude?: number }) => {
     const token = localStorage.getItem('token');
     return fetch('/api/advice/send-stream', {
       method: 'POST',
@@ -90,6 +90,8 @@ export const adviceAPI = {
       body: JSON.stringify(data),
     });
   },
+  getRestaurantDetail: (restaurant: { uid: string; name: string; address?: string }) =>
+    api.post('/advice/restaurant-detail', restaurant),
   createSession: (data?: { title?: string; scenario?: string; is_training_day?: boolean }) =>
     api.post('/advice/sessions', data || {}),
   getSessions: (limit = 20) => api.get('/advice/sessions', { params: { limit } }),

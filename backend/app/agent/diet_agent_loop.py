@@ -17,6 +17,7 @@ from app.tools.profile_tools import ProfileTools
 from app.tools.memory_tools import MemoryTools
 from app.tools.meal_tools import MealTools
 from app.tools.chat_tools import ChatTools
+from app.tools.restaurant_tools import RestaurantTools
 from app.services.llm_service import get_llm_service
 
 
@@ -68,13 +69,17 @@ class AgentResponse:
 class DietAgentLoop:
     """Main agent loop for diet advice using ReAct pattern."""
 
-    def __init__(self, db, user):
+    def __init__(self, db, user, latitude=None, longitude=None, restaurant_context=None):
         self.db = db
         self.user = user
+        self.latitude = latitude
+        self.longitude = longitude
+        self._restaurant_context = restaurant_context or {}
         self.profile_tools = ProfileTools(db)
         self.memory_tools = MemoryTools(db)
         self.meal_tools = MealTools(db)
         self.chat_tools = ChatTools(db)
+        self.restaurant_tools = RestaurantTools(db)
 
     async def run(self, message: str, session_id: int) -> AgentResponse:
         """
@@ -179,7 +184,7 @@ class DietAgentLoop:
         for name, coro in handlers_to_run:
             try:
                 resp = await coro
-                responses.append((name, resp))
+                responses.append((name, resp)) 
             except Exception as e:
                 logger.error(f"[agent] Handler {name} failed: {e}", exc_info=True)
 
@@ -397,35 +402,204 @@ class DietAgentLoop:
         return await self._handle_general_chat(context)
 
     async def _handle_general_chat(self, context: AgentContext) -> AgentResponse:
-        """Handle general chat with LLM."""
+        """Handle general chat with LLM, supporting ReAct tool-calling."""
         self._add_step(context, AgentStep.GENERATING_ADVICE, {})
 
         # Build context for LLM
-        prompt_context = self._build_advice_context(context)
-
-        # Generate response using LLM
         llm = get_llm_service()
         system_prompt = self._get_system_prompt()
+
+        # Build initial conversation history for ReAct loop
+        conversation_history = [{"role": "system", "content": system_prompt}]
+
+        # Add recent messages from session for context continuity
+        if context.recent_messages:
+            for msg in context.recent_messages[-6:]:
+                role = "user" if msg.get("role") == "user" else "assistant"
+                content = msg.get("content", "")
+                if content:
+                    conversation_history.append({"role": role, "content": content})
+
+        # Build user prompt with context
+        prompt_context = self._build_advice_context(context)
         user_prompt = self._build_user_prompt(prompt_context, context.message)
+        conversation_history.append({"role": "user", "content": user_prompt})
 
-        response_text = await llm.generate(system_prompt, user_prompt)
+        # ReAct loop: call LLM, execute tools, continue until direct response
+        max_iterations = 5
+        iteration = 0
+        response_text = ""
+        response_data = {"one_sentence_summary": ""}
 
-        # Try to parse as JSON
-        try:
-            response_data = json.loads(response_text)
-            context.llm_response = response_data
-        except json.JSONDecodeError:
-            response_data = {"one_sentence_summary": response_text}
-            context.llm_response = response_data
+        while iteration < max_iterations:
+            iteration += 1
+            try:
+                response_text = await llm.generate_from_history(conversation_history)
+
+                # Try to parse as JSON
+                try:
+                    response_data = json.loads(response_text)
+                    context.llm_response = response_data
+                except json.JSONDecodeError:
+                    response_data = {"one_sentence_summary": response_text}
+                    context.llm_response = response_data
+
+                # Check if LLM wants to call a tool
+                is_tool_call = response_data.get("response_type") == "tool_call" or (
+                    "tool_name" in response_data and "tool_args" in response_data
+                )
+
+                if is_tool_call:
+                    tool_name = response_data.get("tool_name")
+                    tool_args = response_data.get("tool_args", {})
+
+                    # Execute the tool
+                    tool_result = await self._execute_tool(tool_name, tool_args, context)
+
+                    # Add tool call and result to conversation
+                    conversation_history.append({"role": "assistant", "content": json.dumps(response_data, ensure_ascii=False)})
+                    conversation_history.append({"role": "system", "content": f"[Tool Result for {tool_name}]: {json.dumps(tool_result, ensure_ascii=False)}"})
+
+                    # Continue to next iteration
+                    continue
+
+                # Direct response - we're done
+                break
+
+            except Exception as e:
+                logger.error(f"[ReAct loop] iteration {iteration} error: {e}", exc_info=True)
+                # Don't use generic fallback - let HTTP errors propagate with their real error
+                import httpx
+                if isinstance(e, httpx.HTTPStatusError):
+                    # Return a tool_call retry signal to the LLM with the error context
+                    response_data = {
+                        "response_type": "error",
+                        "error": f"API错误: {str(e)}",
+                        "one_sentence_summary": f"API请求失败，请重试或调整参数"
+                    }
+                else:
+                    response_data = {"one_sentence_summary": f"处理出错: {str(e)}"}
+                break
 
         self._add_step(context, AgentStep.FINAL_RESPONSE, {
-            "preview": response_text[:100]
+            "preview": response_text[:100] if response_text else "no response"
         })
 
         return AgentResponse(
             text=self._format_advice_response(response_data, context),
             steps=context.steps
         )
+
+    async def _execute_tool(self, tool_name: str, tool_args: Dict[str, Any], context: AgentContext) -> Dict[str, Any]:
+        """Execute a tool and return the result."""
+        try:
+            if tool_name == "map_geocode":
+                from app.tools.mcp_client import get_baidu_map_client
+                client = get_baidu_map_client()
+                address = tool_args.get("address", "")
+                is_china = tool_args.get("is_chinese_mainland", True)
+                result = await client.geocode(address, is_china=is_china)
+                logger.info(f"[ReAct] map_geocode: address={address}, result={str(result)[:200] if result else 'None'}")
+                if result and result.get("result"):
+                    geo = result["result"]
+                    location = geo.get("location", {})
+                    lat = location.get("lat")
+                    lng = location.get("lng")
+                    if lat is not None and lng is not None:
+                        return {"success": True, "lat": lat, "lng": lng, "formatted_address": geo.get("formatted_address", "")}
+                return {"success": False, "error": f"无法解析地址: {address}"}
+
+            elif tool_name == "map_search_places":
+                from app.tools.mcp_client import get_baidu_map_client
+                client = get_baidu_map_client()
+                query = tool_args.get("query", "美食")
+                region = tool_args.get("region", "成都")
+                location = tool_args.get("location")
+                radius = tool_args.get("radius", 2000)
+                is_china = tool_args.get("is_chinese_mainland", True)
+
+                logger.info(f"[ReAct] map_search_places: query={query}, region={region}, location={location}")
+                places = await client.search_places(query=query, region=region, location=location, radius=radius, is_china=is_china)
+                logger.info(f"[ReAct] map_search_places returned {len(places) if places else 0} places")
+                if not places:
+                    return {"success": True, "restaurants": [], "message": "未找到结果"}
+
+                restaurants = []
+                for p in places[:tool_args.get("limit", 5)]:
+                    restaurants.append({
+                        "name": p.get("name", ""),
+                        "address": p.get("address", ""),
+                        "tag": p.get("tag", ""),
+                        "overall_rating": p.get("overall_rating"),
+                        "uid": p.get("uid", ""),
+                    })
+                logger.info(f"[ReAct] returning {len(restaurants)} restaurants: {[r['name'] for r in restaurants]}")
+                return {"success": True, "restaurants": restaurants, "count": len(restaurants)}
+
+            elif tool_name == "map_place_details":
+                from app.tools.mcp_client import get_baidu_map_client
+                client = get_baidu_map_client()
+                uid = tool_args.get("uid")
+                is_china = tool_args.get("is_chinese_mainland", True)
+                if not uid:
+                    return {"success": False, "error": "缺少UID"}
+                details = await client.get_place_details(uid, is_china=is_china)
+                if not details:
+                    return {"success": False, "error": "无法获取详情"}
+                return {"success": True, "details": details}
+
+            elif tool_name == "search_restaurants":
+                from app.tools.restaurant_tools import RestaurantTools
+                restaurant_tools = RestaurantTools(self.db)
+                query = tool_args.get("query", "美食")
+                location = tool_args.get("location")
+                region = tool_args.get("region", "成都")
+                radius = tool_args.get("radius", 2000)
+                limit = tool_args.get("limit", 5)
+
+                if not location and self.latitude and self.longitude:
+                    location = f"{self.latitude},{self.longitude}"
+
+                restaurants = await restaurant_tools.search_nearby_restaurants(
+                    user_id=context.user_id,
+                    query=query,
+                    region=region,
+                    location=location,
+                    radius=radius,
+                    limit=limit
+                )
+                return {"success": True, "restaurants": restaurants, "count": len(restaurants)}
+
+            elif tool_name == "get_restaurant_details":
+                from app.tools.restaurant_tools import RestaurantTools
+                restaurant_tools = RestaurantTools(self.db)
+                uid = tool_args.get("uid")
+                name = tool_args.get("name", "")
+                if not uid:
+                    return {"success": False, "error": "缺少UID"}
+                details = await restaurant_tools.get_restaurant_details(uid)
+                if not details:
+                    return {"success": False, "error": "无法获取详情"}
+                return {"success": True, "details": details, "name": name}
+
+            elif tool_name == "get_user_profile":
+                profile = self.profile_tools.get_user_profile(context.user_id)
+                return {"success": True, "profile": profile}
+
+            elif tool_name == "get_today_meals":
+                meals = self.meal_tools.get_today_meals(context.user_id)
+                return {"success": True, "meals": meals}
+
+            elif tool_name == "get_user_memories":
+                memories = self.memory_tools.get_relevant_memories(context.user_id, limit=10)
+                return {"success": True, "memories": memories}
+
+            else:
+                return {"success": False, "error": f"Unknown tool: {tool_name}"}
+
+        except Exception as e:
+            logger.error(f"[DietAgentLoop] tool execution error: {tool_name}: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
 
     async def _estimate_nutrition(self, food_text: str, profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Use LLM to estimate nutrition for a meal."""
@@ -599,7 +773,30 @@ class DietAgentLoop:
 如果用户有过敏、不耐受、睡眠敏感等记忆，必须优先考虑。
 回答要具体，不要空泛。
 尽量给出 2~3 个可执行选项。
-返回JSON格式，包含以下字段：
+
+【重要：当你需要查询餐厅或地点时，必须严格按照以下顺序执行】：
+1. 首先调用 map_geocode 将地址转换为经纬度坐标
+   - 例如用户说"成都中和有什么餐厅"，必须先调用 map_geocode({"address": "成都市双流区中和街道", "is_chinese_mainland": true})
+   - 例如用户说"附近有什么餐厅"，如果知道城市就调用 map_geocode({"address": "成都市武侯区", "is_chinese_mainland": true})
+   - 不要猜测坐标，必须先地理编码！
+2. 获得坐标后，再调用 map_search_places 搜索餐厅
+3. 最后生成带餐厅卡片的回复
+
+可用工具：
+- map_geocode: 将中文地址转换为经纬度坐标，输入 {"address": "详细地址", "is_chinese_mainland": true}
+  返回: {"success": true, "lat": 30.61, "lng": 104.04, "formatted_address": "..."}
+- map_search_places: 搜索地点，输入 {"query": "关键词", "region": "城市", "location": "lat,lng", "radius": 3000, "limit": 5}
+  返回: {"success": true, "restaurants": [{"name": "...", "address": "...", "uid": "...", "overall_rating": ...}]}
+- map_place_details: 获取地点详情，输入 {"uid": "地点UID"}
+- get_user_profile: 获取用户信息
+- get_today_meals: 获取今日饮食记录
+
+调用工具的格式（必须严格遵循）：
+{"response_type": "tool_call", "tool_name": "工具名", "tool_args": {...}}
+
+如果你不需要调用工具，直接返回普通文本回答即可。
+
+返回JSON格式，包含以下字段（当你不调用工具时）：
 - situation_summary: 当前情况分析
 - goal_analysis: 目标分析
 - recommendation_strategy: 推荐策略

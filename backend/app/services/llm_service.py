@@ -104,16 +104,10 @@ class MockLLMService(BaseLLMService):
 
     async def generate(self, system_prompt: str, user_prompt: str) -> str:
         """Return mock response based on user prompt content."""
-        user_lower = user_prompt.lower()
-
         if "diet advice" in system_prompt.lower() or "recommend" in system_prompt.lower():
             return self._get_mock_diet_advice(user_prompt)
         elif "memory" in system_prompt.lower() or "extract" in system_prompt.lower():
             return self._get_mock_memory_extraction(user_prompt)
-        elif "daily plan" in system_prompt.lower():
-            return self._get_mock_daily_plan()
-        elif "weekly review" in system_prompt.lower():
-            return self._get_mock_weekly_review()
         else:
             return self._get_default_mock_response(user_prompt)
 
@@ -269,46 +263,6 @@ class MockLLMService(BaseLLMService):
                     "source": "auto_extracted"
                 }
             ]
-        })
-
-    def _get_mock_daily_plan(self) -> str:
-        """Return mock daily plan response."""
-        return json.dumps({
-            "breakfast_suggestion": "鸡蛋2个 + 牛奶1盒 + 全麦面包2片（约400卡，蛋白质25g）",
-            "lunch_suggestion": "米饭1碗 + 鸡腿1个 + 青菜1份 + 番茄炒蛋（约650卡，蛋白质40g）",
-            "dinner_suggestion": "牛肉饭或鱼肉豆腐餐，避免油炸和重辣（约550卡，蛋白质35g）",
-            "snack_suggestion": "无糖酸奶1盒或水果1个（不超过150卡）",
-            "protein_focus": "今日蛋白质目标约100g，训练日更要保证蛋白质摄入",
-            "avoid_today": ["奶茶", "油炸食品", "蛋糕甜点"],
-            "sleep_reminder": "睡前3小时尽量不要吃东西，晚餐别太晚",
-            "one_day_strategy": "今天比昨天多做一个健康选择就好"
-        })
-
-    def _get_mock_weekly_review(self) -> str:
-        """Return mock weekly review response."""
-        return json.dumps({
-            "week_summary": "本周共记录14餐，平均每日摄入约1800卡，蛋白质摄入基本达标",
-            "what_went_well": [
-                "蛋白质摄入比上周稳定",
-                "外食选择更健康了",
-                "开始注意蔬菜摄入"
-            ],
-            "main_problems": [
-                "晚餐时间偏晚",
-                "偶尔吃高油高盐食物",
-                "饮水可能不够"
-            ],
-            "protein_consistency": "蛋白质摄入约70g/天，有3天达标，4天不足",
-            "sleep_impact_analysis": "注意晚餐不要太晚和太油，可能影响睡眠质量",
-            "eating_out_pattern": "外食场景占80%，油盐控制需要加强",
-            "weight_and_body_fat_trend": "体重基本稳定，体脂需要持续观察",
-            "next_week_strategy": "1. 提前吃晚餐 2. 记录每天蛋白质 3. 增加绿叶蔬菜",
-            "next_week_actions": [
-                "晚餐尽量在7-8点前吃完",
-                "每天至少记录2餐",
-                "选择1-2次轻食替代外卖"
-            ],
-            "warnings": ["如有特殊健康状况，请咨询医生或营养师"]
         })
 
     def _get_default_mock_response(self, user_prompt: str) -> str:

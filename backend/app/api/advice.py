@@ -1,8 +1,8 @@
+import json
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List, Optional
-from datetime import datetime
+from typing import List
 
 from app.core.security import get_current_user
 from app.db.database import get_db
@@ -10,16 +10,12 @@ from app.models.user import User
 from app.models.advice import AdviceSession
 from app.models.chat_message import ChatMessage
 from app.schemas.advice import (
-    AdviceRequest, AdviceResponse,
-    DailyPlanRequest, DailyPlanResponse, WeeklyReviewResponse,
     ChatSessionCreate, ChatSessionResponse,
     ChatMessageCreate, ChatMessageResponse,
-    SendMessageRequest, SendMessageResponse,
+    SendMessageRequest,
     RestaurantDetailRequest, RestaurantDetailResponse
 )
 from app.services.llm_service import get_llm_service
-from app.services.advice_service import AdviceService
-from app.services.memory_extractor import MemoryExtractor
 
 logger = logging.getLogger("eatfit.advice")
 router = APIRouter(prefix="/api/advice", tags=["advice"])
@@ -178,8 +174,6 @@ async def send_message_stream(
     logger.info(f"[send_message_stream] user_id={current_user.id}, message='{request.message[:80]}...'")
 
     async def event_generator():
-        from app.services.llm_service import get_llm_service
-
         # Load restaurant_context from session if exists
         session_rc = None
         if request.session_id:
@@ -201,7 +195,6 @@ async def send_message_stream(
             ).first()
 
         if not session:
-            # No session_id or session not found -> create NEW session
             session = AdviceSession(
                 user_id=current_user.id,
                 title=request.message[:50] if len(request.message) > 50 else request.message,
@@ -224,9 +217,7 @@ async def send_message_stream(
         db.commit()
         db.refresh(user_msg)
 
-        # Yield intent detected
-        import json
-        yield f"event: intent_detected\ndata: {json.dumps({'intent': 'pending', 'confidence': 0.5})}\n\n"
+        yield f"event: intent_detected\ndata: {{}}\n\n"
 
         # Run agent loop
         try:
@@ -236,7 +227,7 @@ async def send_message_stream(
             yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
             return
 
-        # Save restaurant_context back to session if it was updated
+        # Save restaurant_context back to session if updated
         if agent._restaurant_context:
             session.restaurant_context = agent._restaurant_context
             db.commit()
@@ -245,10 +236,9 @@ async def send_message_stream(
         for step in agent_response.steps:
             yield f"event: agent_step\ndata: {json.dumps(step)}\n\n"
 
-        # Yield pending action if exists
+        # Yield pending action or direct response
         try:
             if agent_response.action:
-                # Save assistant message with pending action
                 ai_msg = ChatMessage(
                     session_id=session.id,
                     user_id=current_user.id,
@@ -261,10 +251,8 @@ async def send_message_stream(
                 db.add(ai_msg)
                 db.commit()
                 db.refresh(ai_msg)
-
                 yield f"event: action_pending\ndata: {json.dumps({'message_id': ai_msg.id, 'action': agent_response.action})}\n\n"
             else:
-                # Save assistant message without pending action
                 ai_msg = ChatMessage(
                     session_id=session.id,
                     user_id=current_user.id,
@@ -275,12 +263,10 @@ async def send_message_stream(
                 db.commit()
                 db.refresh(ai_msg)
 
-            # Yield message done
             yield f"event: message_done\ndata: {json.dumps({'message_id': ai_msg.id, 'session_id': session.id, 'content': agent_response.text})}\n\n"
 
             # Memory extraction if enabled
             if current_user.auto_memory_enabled and agent_response.memory_action:
-                # Save memory pending action
                 memory_msg = ChatMessage(
                     session_id=session.id,
                     user_id=current_user.id,
@@ -293,7 +279,6 @@ async def send_message_stream(
                 db.add(memory_msg)
                 db.commit()
                 db.refresh(memory_msg)
-
                 yield f"event: memory_pending\ndata: {json.dumps({'message_id': memory_msg.id, 'memory_action': agent_response.memory_action})}\n\n"
         except Exception as e:
             logger.error(f"[send_message_stream] yielding response failed: {e}", exc_info=True)
@@ -309,224 +294,6 @@ async def send_message_stream(
             "X-Accel-Buffering": "no",
         }
     )
-
-
-@router.post("/send", response_model=SendMessageResponse)
-async def send_message(
-    request: SendMessageRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Send a message and get AI response, with meal/training detection."""
-    logger.info(f"[send_message] user_id={current_user.id}, message='{request.message[:80]}...'")
-    logger.info(f"[send_message] scenario={request.scenario}, is_training_day={request.is_training_day}, session_id={request.session_id}")
-
-    # Find or create session
-    session = None
-    if request.session_id:
-        session = db.query(AdviceSession).filter(
-            AdviceSession.id == request.session_id,
-            AdviceSession.user_id == current_user.id
-        ).first()
-        if session:
-            logger.info(f"[send_message] Using provided session_id={session.id}")
-
-    if not session:
-        session = db.query(AdviceSession).filter(
-            AdviceSession.user_id == current_user.id
-        ).order_by(AdviceSession.created_at.desc()).first()
-
-    if not session:
-        logger.info(f"[send_message] Creating new session for user {current_user.id}")
-        session = AdviceSession(
-            user_id=current_user.id,
-            title=request.message[:50] if len(request.message) > 50 else request.message,
-            user_question=request.message[:200] if request.message else "新对话",
-            scenario=request.scenario or "OTHER",
-            is_training_day=request.is_training_day or False
-        )
-        db.add(session)
-        db.commit()
-        db.refresh(session)
-    else:
-        logger.info(f"[send_message] Using existing session_id={session.id}")
-
-    # Save user message
-    user_msg = ChatMessage(
-        session_id=session.id,
-        user_id=current_user.id,
-        role="user",
-        content=request.message
-    )
-    db.add(user_msg)
-    db.commit()
-    db.refresh(user_msg)
-    logger.info(f"[send_message] User message saved, id={user_msg.id}")
-
-    # Get context for LLM
-    advice_service = AdviceService(db, current_user)
-    profile = advice_service._get_profile()
-    memories = advice_service._get_memories()
-    today_meals = advice_service._get_today_meals()
-    recent_trainings = advice_service._get_recent_trainings()
-    logger.info(f"[send_message] Context loaded - profile={profile is not None}, memories={len(memories)}, today_meals={len(today_meals)}")
-
-    # Generate advice
-    from app.prompts.diet_advice import DietAdvicePromptBuilder
-    system_prompt, user_prompt = DietAdvicePromptBuilder.build(
-        user_question=request.message,
-        context=None,
-        profile=profile,
-        memories=memories,
-        today_meals=today_meals,
-        recent_trainings=recent_trainings,
-        is_training_day=request.is_training_day,
-        scenario=request.scenario
-    )
-
-    logger.info("[send_message] Calling LLM...")
-    llm = get_llm_service()
-    response_text = await llm.generate(system_prompt, user_prompt)
-    logger.info(f"[send_message] LLM response received, length={len(response_text)}, preview='{response_text[:200]}...'")
-
-    # Parse response
-    import json
-    try:
-        response_data = json.loads(response_text)
-        logger.info(f"[send_message] JSON parsed successfully, keys={list(response_data.keys())}")
-    except json.JSONDecodeError as e:
-        logger.error(f"[send_message] JSON parse failed: {e}, response_text='{response_text[:300]}...'")
-        response_data = {
-            "situation_summary": "无法解析AI回复",
-            "goal_analysis": "",
-            "recommendation_strategy": "请稍后重试",
-            "recommended_options": [],
-            "not_recommended": [],
-            "today_remaining_advice": "",
-            "sleep_friendly_tips": "",
-            "training_day_tips": "",
-            "next_meal_advice": "",
-            "risk_level": "MEDIUM",
-            "risk_warnings": ["AI回复解析失败"],
-            "one_sentence_summary": "请稍后重试"
-        }
-
-    # Save AI response as message
-    ai_msg = ChatMessage(
-        session_id=session.id,
-        user_id=current_user.id,
-        role="assistant",
-        content=response_text  # Store raw LLM response for display
-    )
-    db.add(ai_msg)
-    db.commit()
-    db.refresh(ai_msg)
-    logger.info(f"[send_message] AI message saved, id={ai_msg.id}")
-
-    # Proactive memory extraction
-    if current_user.auto_memory_enabled:
-        logger.info("[send_message] Triggering memory extraction...")
-        await MemoryExtractor.extract_and_save(
-            db=db,
-            user=current_user,
-            user_question=request.message,
-            ai_response=response_data
-        )
-        logger.info("[send_message] Memory extraction completed")
-    else:
-        logger.info("[send_message] Memory extraction skipped (auto_memory_enabled=False)")
-
-    # Return response
-    logger.info(f"[send_message] Returning response, session_id={session.id}, message_id={ai_msg.id}")
-    return SendMessageResponse(
-        session_id=session.id,
-        message_id=ai_msg.id,
-        response=response_data,
-        pending_meal_action=None
-    )
-
-
-# ---- Original endpoints (kept for compatibility) ----
-
-@router.post("/generate", response_model=AdviceResponse)
-async def generate_advice(
-    request: AdviceRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    advice_service = AdviceService(db, current_user)
-    result = await advice_service.generate_advice(
-        question=request.question,
-        context=request.context,
-        is_training_day=request.is_training_day,
-        scenario=request.scenario
-    )
-    return result
-
-
-@router.get("/history", response_model=List[dict])
-def list_advice_history(
-    limit: int = 20,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    sessions = db.query(AdviceSession).filter(
-        AdviceSession.user_id == current_user.id
-    ).order_by(AdviceSession.created_at.desc()).limit(limit).all()
-
-    return [
-        {
-            "id": s.id,
-            "title": s.title,
-            "user_question": s.user_question,
-            "created_at": s.created_at.isoformat()
-        }
-        for s in sessions
-    ]
-
-
-@router.get("/history/{session_id}")
-def get_advice_session(
-    session_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    session = db.query(AdviceSession).filter(
-        AdviceSession.id == session_id,
-        AdviceSession.user_id == current_user.id
-    ).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    return {
-        "id": session.id,
-        "title": session.title,
-        "user_question": session.user_question,
-        "context_text": session.context_text,
-        "ai_response": session.ai_response_json,
-        "created_at": session.created_at.isoformat()
-    }
-
-
-@router.post("/daily-plan", response_model=DailyPlanResponse)
-async def generate_daily_plan(
-    request: DailyPlanRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    advice_service = AdviceService(db, current_user)
-    result = await advice_service.generate_daily_plan(is_training_day=request.is_training_day)
-    return result
-
-
-@router.post("/weekly-review", response_model=WeeklyReviewResponse)
-async def generate_weekly_review(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    advice_service = AdviceService(db, current_user)
-    result = await advice_service.generate_weekly_review()
-    return result
 
 
 @router.post("/restaurant-detail", response_model=RestaurantDetailResponse)
@@ -548,9 +315,12 @@ async def get_restaurant_detail(
         return RestaurantDetailResponse(content=f'抱歉，无法获取"{request.name}"的详细信息。')
 
     # Get user profile and memories for context
-    advice_service = AdviceService(db, current_user)
-    profile = advice_service._get_profile()
-    memories = advice_service._get_memories()
+    from app.tools.profile_tools import ProfileTools
+    from app.tools.memory_tools import MemoryTools
+    profile_tools = ProfileTools(db)
+    memory_tools = MemoryTools(db)
+    profile = profile_tools.get_user_profile(current_user.id)
+    memories = memory_tools.get_relevant_memories(current_user.id, "diet_advice", limit=5)
 
     # Format details for LLM
     detail_info = details.get("detail_info", {})

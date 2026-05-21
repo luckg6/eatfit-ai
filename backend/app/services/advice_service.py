@@ -1,21 +1,24 @@
+"""
+Diet advice generation service.
+"""
+
 import json
-from typing import Optional, Dict, Any
+import logging
+from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 
 from app.models.user import User
-from app.models.advice import AdviceSession, DietAdviceRecord
-from app.models.memory import MemoryItem
 from app.models.meal_log import MealLog
-from app.models.records import TrainingRecord, WeightRecord, BodyFatRecord
-from app.services.llm_service import get_llm_service
+from app.models.memory import MemoryItem
+from app.models.records import TrainingRecord
 from app.prompts.diet_advice import DietAdvicePromptBuilder
-from app.prompts.memory_extractor import MemoryExtractorPromptBuilder
-from app.prompts.daily_plan import DailyPlanPromptBuilder
-from app.prompts.weekly_review import WeeklyReviewPromptBuilder
+from app.services.llm_service import get_llm_service
+
+logger = logging.getLogger("eatfit.advice")
 
 
 class AdviceService:
-    """Service for generating diet advice and managing advice sessions."""
+    """Service for generating diet advice."""
 
     def __init__(self, db: Session, user: User):
         self.db = db
@@ -112,44 +115,9 @@ class AdviceService:
             for t in trainings
         ]
 
-    def _get_recent_weights(self, limit: int = 5) -> list:
-        """Get recent weight records."""
-        weights = self.db.query(WeightRecord).filter(
-            WeightRecord.user_id == self.user.id
-        ).order_by(WeightRecord.record_date.desc()).limit(limit).all()
-        return [
-            {
-                "id": w.id,
-                "weight_kg": float(w.weight_kg),
-                "record_date": w.record_date.isoformat() if w.record_date else None,
-                "note": w.note
-            }
-            for w in weights
-        ]
-
-    def _get_recent_body_fat(self, limit: int = 5) -> list:
-        """Get recent body fat records."""
-        records = self.db.query(BodyFatRecord).filter(
-            BodyFatRecord.user_id == self.user.id
-        ).order_by(BodyFatRecord.record_date.desc()).limit(limit).all()
-        return [
-            {
-                "id": r.id,
-                "body_fat_percent": float(r.body_fat_percent),
-                "record_date": r.record_date.isoformat() if r.record_date else None,
-                "note": r.note
-            }
-            for r in records
-        ]
-
-    async def generate_advice(
-        self,
-        question: str,
-        context: Optional[str],
-        is_training_day: bool,
-        scenario: str
-    ) -> Dict[str, Any]:
-        """Generate diet advice."""
+    async def generate_diet_advice(self, question: str, context: Optional[str],
+                                    is_training_day: bool, scenario: str) -> Dict[str, Any]:
+        """Generate diet advice for a user question."""
         profile = self._get_profile()
         memories = self._get_memories()
         today_meals = self._get_today_meals()
@@ -190,148 +158,4 @@ class AdviceService:
                 "one_sentence_summary": "请稍后重试"
             }
 
-        session = AdviceSession(
-            user_id=self.user.id,
-            title=question[:50],
-            user_question=question,
-            context_text=context,
-            ai_response_json=response_data
-        )
-        self.db.add(session)
-        self.db.commit()
-        self.db.refresh(session)
-
-        advice_record = DietAdviceRecord(
-            user_id=self.user.id,
-            session_id=session.id,
-            situation_summary=response_data.get("situation_summary"),
-            recommendation_strategy=response_data.get("recommendation_strategy"),
-            recommended_options_json=response_data.get("recommended_options"),
-            not_recommended_json=response_data.get("not_recommended"),
-            estimated_summary_json={
-                "calories": sum(opt.get("estimated_calories", 0) for opt in response_data.get("recommended_options", [])),
-                "protein": sum(opt.get("estimated_protein", 0) for opt in response_data.get("recommended_options", []))
-            },
-            next_meal_advice=response_data.get("next_meal_advice"),
-            sleep_friendly_tips=response_data.get("sleep_friendly_tips"),
-            risk_level=response_data.get("risk_level", "LOW")
-        )
-        self.db.add(advice_record)
-        self.db.commit()
-
-        if self.user.auto_memory_enabled:
-            await self._extract_and_save_memories(profile, question, response_data)
-
         return response_data
-
-    async def _extract_and_save_memories(
-        self,
-        profile: Dict[str, Any],
-        user_question: str,
-        ai_response: Dict[str, Any]
-    ):
-        """Extract and save memories from conversation."""
-        system_prompt, user_prompt = MemoryExtractorPromptBuilder.build(
-            profile=profile,
-            user_question=user_question,
-            ai_response=ai_response
-        )
-
-        llm = get_llm_service()
-        response_text = await llm.generate(system_prompt, user_prompt)
-
-        try:
-            memory_data = json.loads(response_text) if isinstance(response_text, str) else response_text
-            memories = memory_data.get("memories", [])
-
-            for mem in memories[:3]:
-                existing = self.db.query(MemoryItem).filter(
-                    MemoryItem.user_id == self.user.id,
-                    MemoryItem.memory_type == mem.get("memoryType"),
-                    MemoryItem.content == mem.get("content")
-                ).first()
-
-                if not existing:
-                    memory = MemoryItem(
-                        user_id=self.user.id,
-                        memory_type=mem.get("memoryType"),
-                        content=mem.get("content"),
-                        importance_score=mem.get("importanceScore", 5),
-                        source=mem.get("source", "auto_extracted")
-                    )
-                    self.db.add(memory)
-
-            self.db.commit()
-        except Exception:
-            pass
-
-    async def generate_daily_plan(self, is_training_day: bool) -> Dict[str, Any]:
-        """Generate daily meal plan."""
-        profile = self._get_profile()
-        memories = self._get_memories(memory_types=["DIET_PREFERENCE", "FOOD_DISLIKE", "STRATEGY"])
-        today_meals = self._get_today_meals()
-
-        system_prompt, user_prompt = DailyPlanPromptBuilder.build(
-            profile=profile,
-            memories=memories,
-            today_meals=today_meals,
-            is_training_day=is_training_day
-        )
-
-        llm = get_llm_service()
-        response_text = await llm.generate(system_prompt, user_prompt)
-
-        try:
-            return json.loads(response_text) if isinstance(response_text, str) else response_text
-        except json.JSONDecodeError:
-            return {
-                "breakfast_suggestion": "请稍后重试",
-                "lunch_suggestion": "",
-                "dinner_suggestion": "",
-                "snack_suggestion": "",
-                "protein_focus": "",
-                "avoid_today": [],
-                "sleep_reminder": "",
-                "one_day_strategy": "请稍后重试"
-            }
-
-    async def generate_weekly_review(self) -> Dict[str, Any]:
-        """Generate weekly diet review."""
-        from app.tools.meal_log_tool import MealLogTool
-
-        profile = self._get_profile()
-        memories = self._get_memories()
-        recent_trainings = self._get_recent_trainings()
-        recent_weights = self._get_recent_weights()
-        recent_body_fat = self._get_recent_body_fat()
-
-        meal_log_tool = MealLogTool(self.db)
-        weekly_meals = meal_log_tool.summarize_weekly_intake(self.user.id)
-
-        system_prompt, user_prompt = WeeklyReviewPromptBuilder.build(
-            profile=profile,
-            memories=memories,
-            weekly_meals=weekly_meals,
-            recent_trainings=recent_trainings,
-            recent_weights=recent_weights,
-            recent_body_fat=recent_body_fat
-        )
-
-        llm = get_llm_service()
-        response_text = await llm.generate(system_prompt, user_prompt)
-
-        try:
-            return json.loads(response_text) if isinstance(response_text, str) else response_text
-        except json.JSONDecodeError:
-            return {
-                "week_summary": "请稍后重试",
-                "what_went_well": [],
-                "main_problems": [],
-                "protein_consistency": "",
-                "sleep_impact_analysis": "",
-                "eating_out_pattern": "",
-                "weight_and_body_fat_trend": "",
-                "next_week_strategy": "",
-                "next_week_actions": [],
-                "warnings": ["AI回复解析失败，建议稍后重试"]
-            }

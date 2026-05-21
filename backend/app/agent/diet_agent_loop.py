@@ -35,6 +35,47 @@ class AgentStep(Enum):
     EXTRACTING_MEMORIES = "extracting_memories"
     MEMORY_SAVED = "memory_saved"
     FINAL_RESPONSE = "final_response"
+    # ReAct loop specific steps
+    REACT_CALL_LLM = "react_call_llm"
+    REACT_TOOL_CALL = "react_tool_call"
+    REACT_TOOL_RESULT = "react_tool_result"
+    REACT_TOOL_ERROR = "react_tool_error"
+    REACT_DIRECT_RESPONSE = "react_direct_response"
+    REACT_MAX_ITERATIONS = "react_max_iterations"
+    REACT_HINT_PROGRESS = "react_hint_progress"
+    REACT_HINT_TOOL_REMINDER = "react_hint_tool_reminder"
+    REACT_HINT_NEAR_LIMIT = "react_hint_near_limit"
+    REACT_HINT_STUCK = "react_hint_stuck"
+
+
+@dataclass
+class ReActLoopState:
+    """Tracks state across ReAct loop iterations for progressive hint injection."""
+    iteration: int = 0
+    tool_calls_this_turn: int = 0
+    consecutive_no_tool_calls: int = 0
+    total_tool_calls: int = 0
+    last_tool_name: Optional[str] = None
+    tool_errors: int = 0
+    llm_errors: int = 0
+
+    def record_tool_call(self, tool_name: str):
+        self.tool_calls_this_turn += 1
+        self.total_tool_calls += 1
+        self.consecutive_no_tool_calls = 0
+        self.last_tool_name = tool_name
+
+    def record_no_tool_call(self):
+        self.consecutive_no_tool_calls += 1
+
+    def record_tool_error(self):
+        self.tool_errors += 1
+
+    def record_llm_error(self):
+        self.llm_errors += 1
+
+    def reset_turn(self):
+        self.tool_calls_this_turn = 0
 
 
 @dataclass
@@ -391,11 +432,232 @@ class DietAgentLoop:
         )
 
     async def _handle_restaurant_search_planned(self, context: AgentContext) -> AgentResponse:
-        """Handle restaurant search intent (Phase 2 planned)."""
+        """Handle restaurant search intent (Phase 2 planned).
+
+        When this intent is triggered, it means the user triggered "附近" quick match
+        OR wants to look up a specific restaurant's details.
+        The GPS coordinates are already available from self.latitude/self.longitude (passed from frontend).
+        No need to call geocode - just search restaurants directly.
+        """
+        message = context.message
+
+        # Check if this is a restaurant detail lookup (user selected a restaurant from previous search)
+        # Pattern: "帮我查看餐厅"XXX"(UID:xxx)的详细信息，分析是否符合我的饮食目标"
+        # Support both ASCII quotes and Unicode curly quotes
+        detail_match = re.search(r'餐厅["""](.+?)["""][\s（(]*UID:([a-zA-Z0-9]+)', message)
+        if detail_match:
+            return await self._handle_restaurant_detail_lookup(context, detail_match.group(1), detail_match.group(2))
+
+        # Otherwise, this is a new nearby restaurant search
+        self._add_step(context, AgentStep.GENERATING_ADVICE, {"intent": "restaurant_search_planned"})
+
+        # Check if we have GPS coordinates
+        if not self.latitude or not self.longitude:
+            return AgentResponse(
+                text="无法获取你的位置信息，请在手机设置中开启定位权限后再试。",
+                steps=context.steps
+            )
+
+        # Build location string for search
+        location = f"{self.latitude},{self.longitude}"
+
+        # Determine region from coordinates (use a default city like Chengdu)
+        # The region is used by Baidu Map for disambiguation
+        region = "成都"
+
+        # Search for restaurants near the user
+        try:
+            restaurants = await self.restaurant_tools.search_nearby_restaurants(
+                user_id=context.user_id,
+                query="美食",
+                location=location,
+                region=region,
+                radius=3000,
+                limit=5
+            )
+        except Exception as e:
+            logger.error(f"[restaurant] search failed: {e}", exc_info=True)
+            return AgentResponse(
+                text="搜索附近餐厅时出错，请稍后再试。",
+                steps=context.steps
+            )
+
+        if not restaurants:
+            return AgentResponse(
+                text="附近没有找到餐厅，可能当前位置比较偏或者网络问题。",
+                steps=context.steps
+            )
+
+        # Format restaurant names for display
+        restaurant_names = [r.get("name", "未知") for r in restaurants]
+
+        # Create pending action for restaurant selection
+        action_data = {
+            "action_type": "restaurant_select",
+            "action_status": "pending",
+            "action_data": {
+                "restaurants": restaurants,
+                "search_params": {
+                    "location": location,
+                    "region": region,
+                    "radius": 3000
+                }
+            }
+        }
+
+        self._add_step(context, AgentStep.CREATING_PENDING_ACTION, {
+            "action_type": "restaurant_search",
+            "restaurant_count": len(restaurants),
+            "restaurants": restaurant_names
+        })
+
+        # Return response with restaurant card pending confirmation
+        response_text = f"找到 {len(restaurants)} 家附近餐厅，请选择你想了解的餐厅，我帮你分析适合你的菜品：\n" + \
+                        "\n".join([f"{i+1}. {name}" for i, name in enumerate(restaurant_names)])
+
         return AgentResponse(
-            text="餐馆搜索能力会在下一阶段接入地图工具。目前你可以告诉我你附近的几个餐馆或外卖选项，我可以先帮你判断哪个更适合你的目标。",
+            text=response_text,
+            action=action_data,
             steps=context.steps
         )
+
+    async def _handle_restaurant_detail_lookup(self, context: AgentContext, restaurant_name: str, uid: str) -> AgentResponse:
+        """Handle restaurant detail lookup after user selects a restaurant from the list."""
+        self._add_step(context, AgentStep.GENERATING_ADVICE, {"intent": "restaurant_detail_lookup", "name": restaurant_name, "uid": uid})
+
+        # Get restaurant details
+        try:
+            details = await self.restaurant_tools.get_restaurant_details(uid)
+        except Exception as e:
+            logger.error(f"[restaurant] detail lookup failed: {e}", exc_info=True)
+            return AgentResponse(
+                text=f"获取餐厅 '{restaurant_name}' 详细信息时出错，请稍后再试。",
+                steps=context.steps
+            )
+
+        if not details:
+            return AgentResponse(
+                text=f"未找到餐厅 '{restaurant_name}' 的详细信息。",
+                steps=context.steps
+            )
+
+        # Build context for LLM analysis
+        profile = context.profile
+        goal = profile.get("primary_goal", "UNKNOWN") if profile else "UNKNOWN"
+        goal_names = {"FAT_LOSS": "减脂", "MUSCLE_GAIN": "增肌", "MAINTAIN": "维持", "SUGAR_CONTROL": "控糖", "SLEEP_IMPROVEMENT": "改善睡眠"}
+
+        # Extract useful info from details for analysis
+        name = details.get("name", restaurant_name)
+        address = details.get("address", "")
+        tag = details.get("tag", "")
+        rating = details.get("overall_rating")
+        price_level = details.get("price_level")
+        telephone = details.get("telephone")
+
+        # Build analysis prompt for LLM
+        analysis_prompt = self._build_restaurant_analysis_prompt(
+            restaurant_name=name,
+            address=address,
+            tag=tag,
+            rating=rating,
+            price_level=price_level,
+            telephone=telephone,
+            details=details,
+            user_goal=goal,
+            goal_name=goal_names.get(goal, goal),
+            profile=profile,
+            today_meals=context.today_meals
+        )
+
+        # Use LLM to generate advice
+        llm = get_llm_service()
+        try:
+            advice_text = await llm.generate(
+                "你是一个外食健康饮食助手，根据餐厅信息和用户目标，给出是否适合用户的分析和建议。",
+                analysis_prompt
+            )
+        except Exception as e:
+            logger.error(f"[restaurant] LLM analysis failed: {e}", exc_info=True)
+            return AgentResponse(
+                text=f"分析餐厅 '{restaurant_name}' 时出错，请稍后再试。",
+                steps=context.steps
+            )
+
+        self._add_step(context, AgentStep.FINAL_RESPONSE, {"restaurant": name, "goal": goal})
+
+        return AgentResponse(
+            text=f"**{name}**\n\n{advice_text}",
+            steps=context.steps
+        )
+
+    def _build_restaurant_analysis_prompt(
+        self,
+        restaurant_name: str,
+        address: str,
+        tag: str,
+        rating: float,
+        price_level: int,
+        telephone: str,
+        details: Dict[str, Any],
+        user_goal: str,
+        goal_name: str,
+        profile: Optional[Dict],
+        today_meals: List[Dict]
+    ) -> str:
+        """Build prompt for LLM to analyze a restaurant against user's diet goals."""
+        # Extract basic info
+        info_parts = [f"餐厅名称: {restaurant_name}"]
+        if address:
+            info_parts.append(f"地址: {address}")
+        if tag:
+            info_parts.append(f"标签: {tag}")
+        if rating:
+            info_parts.append(f"评分: {rating}分")
+        if price_level:
+            info_parts.append(f"价位: {price_level}（数字越大越贵）")
+        if telephone:
+            info_parts.append(f"电话: {telephone}")
+
+        # Add detail fields if available
+        if details.get("business_time"):
+            info_parts.append(f"营业时间: {details['business_time']}")
+        if details.get("type"):
+            info_parts.append(f"餐厅类型: {details['type']}")
+
+        basic_info = "\n".join(info_parts)
+
+        # Today's meals summary
+        today_summary = ""
+        if today_meals:
+            total_cal = sum(m.get("estimated_calories", 0) for m in today_meals)
+            total_protein = sum(m.get("estimated_protein", 0) for m in today_meals)
+            today_summary = f"今日已记录 {len(today_meals)} 餐，共 {total_cal:.0f} 千卡，蛋白质 {total_protein:.0f}g"
+        else:
+            today_summary = "今日尚未记录任何饮食"
+
+        # Build the full prompt
+        prompt = f"""分析以下餐厅是否符合用户的饮食目标：
+
+【餐厅信息】
+{basic_info}
+
+【用户饮食目标】
+{goal_name} ({user_goal})
+
+【用户今日饮食情况】
+{today_summary}
+
+【用户profile信息】
+{profile if profile else "未获取到"}
+
+请分析：
+1. 这个餐厅是否适合用户的饮食目标？
+2. 如果目标 是增肌，推荐哪些高蛋白菜品？
+3. 如果目标是减脂，建议避免哪些高热量菜品？
+4. 给出具体的点餐建议（2-3个推荐，1-2个避免）
+
+回答要具体、实用，基于餐厅的标签和类型给出建议。"""
+        return prompt
 
     async def _handle_diet_advice(self, context: AgentContext) -> AgentResponse:
         """Handle diet advice intent (called as part of multi-intent)."""
@@ -428,15 +690,69 @@ class DietAgentLoop:
         # ReAct loop: call LLM, execute tools, continue until direct response
         max_iterations = 5
         iteration = 0
+        state = ReActLoopState()
         response_text = ""
         response_data = {"one_sentence_summary": ""}
 
+        # Progressive hint templates — injected based on loop state
+        TOOL_REMINDER_HINT = """可用工具提醒：
+- map_geocode: 将地址转换为经纬度
+- map_search_places: 搜索餐厅/地点
+- map_place_details: 获取地点详情
+- get_user_profile: 获取用户信息
+- get_today_meals: 获取今日饮食记录
+
+如需查询餐厅，先用 map_geocode 获取坐标，再用 map_search_places 搜索。"""
+
+        NEAR_LIMIT_HINT = "⚠️ 你即将达到最大对话轮次（{remaining}轮）。如果还有信息需要查询，请尽快完成，或直接给出建议。"
+
+        STUCK_HINT = "你已经连续 {turns} 轮没有调用工具。如果当前信息足以回答用户，请直接给出建议。"
+
+        def _inject_hint(conversation_history: List[Dict], state: ReActLoopState, iteration: int) -> None:
+            """Inject progressive hints based on current loop state."""
+            remaining = max_iterations - iteration
+            if remaining <= 2 and remaining > 0:
+                hint = NEAR_LIMIT_HINT.format(remaining=remaining)
+                conversation_history.append({"role": "system", "content": hint})
+                self._add_step(context, AgentStep.REACT_HINT_NEAR_LIMIT, {
+                    "hint": hint,
+                    "remaining": remaining,
+                    "iteration": iteration
+                })
+
+            if state.consecutive_no_tool_calls >= 2:
+                if state.total_tool_calls == 0:
+                    hint = TOOL_REMINDER_HINT
+                    conversation_history.append({"role": "system", "content": hint})
+                    self._add_step(context, AgentStep.REACT_HINT_TOOL_REMINDER, {
+                        "hint": "never_called_tools",
+                        "iteration": iteration
+                    })
+                else:
+                    hint = STUCK_HINT.format(turns=state.consecutive_no_tool_calls)
+                    conversation_history.append({"role": "system", "content": hint})
+                    self._add_step(context, AgentStep.REACT_HINT_STUCK, {
+                        "hint": "stuck_no_tool_calls",
+                        "consecutive": state.consecutive_no_tool_calls,
+                        "iteration": iteration
+                    })
+
         while iteration < max_iterations:
             iteration += 1
+            state.iteration = iteration
+            state.reset_turn()
+
+            self._add_step(context, AgentStep.REACT_CALL_LLM, {
+                "iteration": iteration,
+                "total_tool_calls": state.total_tool_calls,
+                "consecutive_no_tool": state.consecutive_no_tool_calls
+            })
+
+            _inject_hint(conversation_history, state, iteration)
+
             try:
                 response_text = await llm.generate_from_history(conversation_history)
 
-                # Try to parse as JSON
                 try:
                     response_data = json.loads(response_text)
                     context.llm_response = response_data
@@ -444,7 +760,6 @@ class DietAgentLoop:
                     response_data = {"one_sentence_summary": response_text}
                     context.llm_response = response_data
 
-                # Check if LLM wants to call a tool
                 is_tool_call = response_data.get("response_type") == "tool_call" or (
                     "tool_name" in response_data and "tool_args" in response_data
                 )
@@ -453,35 +768,94 @@ class DietAgentLoop:
                     tool_name = response_data.get("tool_name")
                     tool_args = response_data.get("tool_args", {})
 
-                    # Execute the tool
+                    self._add_step(context, AgentStep.REACT_TOOL_CALL, {
+                        "iteration": iteration,
+                        "tool_name": tool_name,
+                        "tool_args_keys": list(tool_args.keys()) if tool_args else []
+                    })
+
                     tool_result = await self._execute_tool(tool_name, tool_args, context)
+                    state.record_tool_call(tool_name)
 
-                    # Add tool call and result to conversation
-                    conversation_history.append({"role": "assistant", "content": json.dumps(response_data, ensure_ascii=False)})
-                    conversation_history.append({"role": "system", "content": f"[Tool Result for {tool_name}]: {json.dumps(tool_result, ensure_ascii=False)}"})
+                    if not tool_result.get("success", False):
+                        state.record_tool_error()
+                        error_msg = tool_result.get("error", "unknown error")
+                        conversation_history.append({
+                            "role": "assistant",
+                            "content": json.dumps(response_data, ensure_ascii=False)
+                        })
+                        conversation_history.append({
+                            "role": "system",
+                            "content": f"[TOOL ERROR] {tool_name} failed: {error_msg}"
+                        })
+                        self._add_step(context, AgentStep.REACT_TOOL_ERROR, {
+                            "iteration": iteration,
+                            "tool_name": tool_name,
+                            "error": error_msg
+                        })
+                        continue
 
-                    # Continue to next iteration
+                    conversation_history.append({
+                        "role": "assistant",
+                        "content": json.dumps(response_data, ensure_ascii=False)
+                    })
+                    conversation_history.append({
+                        "role": "system",
+                        "content": f"[Tool Result for {tool_name}]: {json.dumps(tool_result, ensure_ascii=False)}"
+                    })
+                    self._add_step(context, AgentStep.REACT_TOOL_RESULT, {
+                        "iteration": iteration,
+                        "tool_name": tool_name,
+                        "success": True,
+                        "result_count": len(tool_result.get("restaurants", [])) if tool_name == "map_search_places" else None
+                    })
+
+                    # If search returned no results, inject a hint to retry with a broader query
+                    if tool_name == "map_search_places" and tool_result.get("restaurants") == []:
+                        retry_hint = (
+                            "地图搜索返回0结果。请用更宽泛的关键词重试，例如 query=\"餐厅\" 或 query=\"美食\"，"
+                            "不要放弃，继续调用 map_search_places 获取可供选择的餐厅列表。"
+                        )
+                        conversation_history.append({"role": "system", "content": retry_hint})
+                        self._add_step(context, AgentStep.REACT_HINT_PROGRESS, {
+                            "hint": "retry_search",
+                            "reason": "empty_results",
+                            "iteration": iteration
+                        })
+                        continue
+
                     continue
 
-                # Direct response - we're done
+                self._add_step(context, AgentStep.REACT_DIRECT_RESPONSE, {
+                    "iteration": iteration,
+                    "preview": response_text[:80] if response_text else ""
+                })
+                state.record_no_tool_call()
                 break
 
             except Exception as e:
                 logger.error(f"[ReAct loop] iteration {iteration} error: {e}", exc_info=True)
-                # Don't use generic fallback - let HTTP errors propagate with their real error
-                import httpx
-                if isinstance(e, httpx.HTTPStatusError):
-                    # Return a tool_call retry signal to the LLM with the error context
-                    response_data = {
-                        "response_type": "error",
-                        "error": f"API错误: {str(e)}",
-                        "one_sentence_summary": f"API请求失败，请重试或调整参数"
-                    }
-                else:
-                    response_data = {"one_sentence_summary": f"处理出错: {str(e)}"}
-                break
+                state.record_llm_error()
+                return AgentResponse(
+                    text=f"处理请求时出错: {str(e)[:100]}",
+                    steps=context.steps
+                )
+
+        if iteration >= max_iterations:
+            self._add_step(context, AgentStep.REACT_MAX_ITERATIONS, {
+                "total_iterations": iteration,
+                "total_tool_calls": state.total_tool_calls,
+                "tool_errors": state.tool_errors,
+                "preview": response_text[:100] if response_text else "no response"
+            })
+            return AgentResponse(
+                text="已达最大对话轮次（5轮），请尝试简化问题或重新开始。",
+                steps=context.steps
+            )
 
         self._add_step(context, AgentStep.FINAL_RESPONSE, {
+            "iteration": iteration,
+            "total_tool_calls": state.total_tool_calls,
             "preview": response_text[:100] if response_text else "no response"
         })
 

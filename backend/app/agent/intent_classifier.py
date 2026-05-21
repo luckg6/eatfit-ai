@@ -88,6 +88,10 @@ RESTAURANT_SEARCH_PATTERNS = [
     (r"附近.*(餐馆|餐厅|饭店|外卖)", 0.85),
     (r"搜索.*附近|找.*附近", 0.8),
     (r"地图.*搜索|百度地图", 0.7),
+    # Restaurant detail lookup (higher priority than dashboard_query)
+    (r"(帮我)?查看.*餐厅.*详细信息", 0.88),
+    (r"餐厅.*(UID|uid).*详细", 0.9),
+    (r"(分析|查看).*是否符合.*(目标|饮食)", 0.85),
 ]
 
 
@@ -202,16 +206,16 @@ def classify_multi(text: str) -> List[Tuple[Intent, float, str]]:
             results.append((Intent.PROFILE_UPDATE, base_confidence, f"Matched profile pattern: {pattern}"))
             break
 
+    # Check restaurant_search (higher priority for restaurant-specific messages)
+    for pattern, base_confidence in RESTAURANT_SEARCH_PATTERNS:
+        if re.search(pattern, text):
+            results.append((Intent.RESTAURANT_SEARCH_PLANNED, base_confidence, f"Matched restaurant pattern: {pattern}"))
+            break
+
     # Check dashboard_query
     for pattern, base_confidence in DASHBOARD_QUERY_PATTERNS:
         if re.search(pattern, text):
             results.append((Intent.DASHBOARD_QUERY, base_confidence, f"Matched dashboard pattern: {pattern}"))
-            break
-
-    # Check restaurant_search
-    for pattern, base_confidence in RESTAURANT_SEARCH_PATTERNS:
-        if re.search(pattern, text):
-            results.append((Intent.RESTAURANT_SEARCH_PLANNED, base_confidence, f"Matched restaurant pattern: {pattern}"))
             break
 
     # Sort by confidence descending

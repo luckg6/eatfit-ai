@@ -17,7 +17,19 @@ const stepLabels: Record<string, string> = {
   creating_pending_action: "创建确认卡",
   generating_advice: "生成建议",
   extracting_memories: "抽取记忆",
+  memory_saved: "记忆已保存",
   final_response: "最终回复",
+  // ReAct loop steps
+  react_call_llm: "LLM调用",
+  react_tool_call: "工具调用",
+  react_tool_result: "工具结果",
+  react_tool_error: "工具错误",
+  react_direct_response: "直接回复",
+  react_max_iterations: "达到上限",
+  react_hint_progress: "进度提示",
+  react_hint_tool_reminder: "工具提醒",
+  react_hint_near_limit: "接近上限",
+  react_hint_stuck: "卡住了",
 };
 
 const stepIcons: Record<string, string> = {
@@ -30,7 +42,19 @@ const stepIcons: Record<string, string> = {
   creating_pending_action: "✨",
   generating_advice: "💬",
   extracting_memories: "💾",
+  memory_saved: "💾",
   final_response: "✅",
+  // ReAct loop steps
+  react_call_llm: "🤖",
+  react_tool_call: "🔧",
+  react_tool_result: "📥",
+  react_tool_error: "⚠️",
+  react_direct_response: "💡",
+  react_max_iterations: "⏳",
+  react_hint_progress: "📍",
+  react_hint_tool_reminder: "🔔",
+  react_hint_near_limit: "⚡",
+  react_hint_stuck: "🌀",
 };
 
 const stepColors: Record<string, { bg: string; text: string; border: string }> = {
@@ -43,7 +67,19 @@ const stepColors: Record<string, { bg: string; text: string; border: string }> =
   creating_pending_action: { bg: "bg-orange-500/10", text: "text-orange-400", border: "border-orange-500/30" },
   generating_advice: { bg: "bg-indigo-500/10", text: "text-indigo-400", border: "border-indigo-500/30" },
   extracting_memories: { bg: "bg-teal-500/10", text: "text-teal-400", border: "border-teal-500/30" },
+  memory_saved: { bg: "bg-teal-500/10", text: "text-teal-400", border: "border-teal-500/30" },
   final_response: { bg: "bg-emerald-500/10", text: "text-emerald-400", border: "border-emerald-500/30" },
+  // ReAct loop steps
+  react_call_llm: { bg: "bg-violet-500/10", text: "text-violet-400", border: "border-violet-500/30" },
+  react_tool_call: { bg: "bg-blue-500/10", text: "text-blue-400", border: "border-blue-500/30" },
+  react_tool_result: { bg: "bg-cyan-500/10", text: "text-cyan-400", border: "border-cyan-500/30" },
+  react_tool_error: { bg: "bg-red-500/10", text: "text-red-400", border: "border-red-500/30" },
+  react_direct_response: { bg: "bg-emerald-500/10", text: "text-emerald-400", border: "border-emerald-500/30" },
+  react_max_iterations: { bg: "bg-amber-500/10", text: "text-amber-400", border: "border-amber-500/30" },
+  react_hint_progress: { bg: "bg-gray-500/10", text: "text-gray-400", border: "border-gray-500/30" },
+  react_hint_tool_reminder: { bg: "bg-yellow-500/10", text: "text-yellow-400", border: "border-yellow-500/30" },
+  react_hint_near_limit: { bg: "bg-orange-500/10", text: "text-orange-400", border: "border-orange-500/30" },
+  react_hint_stuck: { bg: "bg-rose-500/10", text: "text-rose-400", border: "border-rose-500/30" },
 };
 
 export default function AgentTracePanel({
@@ -152,6 +188,16 @@ export default function AgentTracePanel({
                     {step.data.intent && (
                       <span className="ml-auto text-xs text-gray-400 truncate max-w-[120px]">
                         {step.data.intent}
+                      </span>
+                    )}
+                    {step.data.tool_name && (
+                      <span className="ml-auto text-xs text-gray-400 truncate max-w-[120px]">
+                        {step.data.tool_name}
+                      </span>
+                    )}
+                    {step.data.iteration !== undefined && (
+                      <span className="ml-auto text-xs text-gray-500">
+                        第{step.data.iteration}轮
                       </span>
                     )}
                   </div>

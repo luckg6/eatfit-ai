@@ -200,7 +200,8 @@ async def send_message_stream(
                 title=request.message[:50] if len(request.message) > 50 else request.message,
                 user_question=request.message[:200] if request.message else "新对话",
                 scenario=request.scenario or "OTHER",
-                is_training_day=1 if request.is_training_day else 0
+                # PG 端是 BOOLEAN，不要再传 int
+                is_training_day=bool(request.is_training_day)
             )
             db.add(session)
             db.commit()

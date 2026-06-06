@@ -965,7 +965,14 @@ class DietAgentLoop:
                 return {"success": True, "meals": meals}
 
             elif tool_name == "get_user_memories":
-                memories = self.memory_tools.get_relevant_memories(context.user_id, limit=10)
+                # ReAct 工具只在 _handle_general_chat（diet_advice 流）里被调用，
+                # 因此 intent 硬编码为 'diet_advice'。原代码漏传 intent，导致
+                # kwarg `limit=10` 被绑到 intent 槽位，整条向量查询退化成纯数字匹配。
+                memories = self.memory_tools.get_relevant_memories(
+                    user_id=context.user_id,
+                    intent="diet_advice",
+                    limit=10,
+                )
                 return {"success": True, "memories": memories}
 
             else:

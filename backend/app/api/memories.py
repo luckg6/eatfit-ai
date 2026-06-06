@@ -7,6 +7,7 @@ from app.db.database import get_db
 from app.models.user import User
 from app.models.memory import MemoryItem
 from app.schemas.memory import MemoryItemResponse, MemoryItemCreate, MemoryItemUpdate
+from app.tools.memory_tools import MemoryTools
 
 router = APIRouter(prefix="/api/memories", tags=["memories"])
 
@@ -47,6 +48,10 @@ def create_memory(
     db.add(memory)
     db.commit()
     db.refresh(memory)
+    # 修复断层 A: REST 写入路径不调 embed 导致向量召回不可见
+    # 用 MemoryTools.embed_memory 走与 create_memory 相同的 raw SQL 写向量
+    MemoryTools(db).embed_memory(memory.id, memory.content)
+    db.refresh(memory)
     return memory
 
 
@@ -65,11 +70,19 @@ def update_memory(
         raise HTTPException(status_code=404, detail="Memory not found")
 
     update_data = memory_data.model_dump(exclude_unset=True)
+    content_changed = False
     for key, value in update_data.items():
+        if key == "content" and value != memory.content:
+            content_changed = True
         setattr(memory, key, value)
 
     db.commit()
     db.refresh(memory)
+
+    # 修复断层 A: 内容变了要重 embed，否则旧向量指向旧 content
+    if content_changed:
+        MemoryTools(db).embed_memory(memory.id, memory.content)
+        db.refresh(memory)
     return memory
 
 

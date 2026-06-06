@@ -1,4 +1,4 @@
-from sqlalchemy import Column, BigInteger, String, DateTime, Text, ForeignKey, JSON, func
+from sqlalchemy import Column, BigInteger, String, DateTime, Text, ForeignKey, JSON, Boolean, func
 from sqlalchemy.orm import relationship
 from app.db.database import Base
 
@@ -13,7 +13,8 @@ class AdviceSession(Base):
     context_text = Column(Text)
     ai_response_json = Column(JSON)
     scenario = Column(String(64), default="OTHER")
-    is_training_day = Column(BigInteger, default=0)
+    # 修复 boolean 映射: MySQL 时代是 tinyint(1)，PG 端是 BOOLEAN
+    is_training_day = Column(Boolean, default=False)
     # Stores restaurant search results for the session (used when user selects a restaurant)
     restaurant_context = Column(JSON, default=dict)
     created_at = Column(DateTime, nullable=False, default=func.now())

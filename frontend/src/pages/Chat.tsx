@@ -275,18 +275,26 @@ export default function Chat() {
               }
 
               if (event.memory_action) {
-                // Memory pending confirmation
-                const memoryMsg: ChatMessage = {
-                  id: `mem-${Date.now()}`,
-                  role: 'assistant',
-                  content: event.memory_action.display_text || '是否记住这条信息？',
-                  action: {
-                    type: 'memory_confirm',
-                    data: event.memory_action,
-                    status: 'pending'
-                  }
-                };
-                setMessages(prev => [...prev, memoryMsg]);
+                // Memory pending confirmation.
+                // 修 bug: 之前用 `mem-${Date.now()}` 合成 id，导致 handleConfirmMemory
+                // 里 parseInt 拿到 NaN，PATCH /messages/{id} 永远 404。
+                // 现在用 server 端 SSE 携带的真实 message_id（见 advice.py:282）。
+                const serverMsgId = event.message_id;
+                if (serverMsgId == null) {
+                  console.warn('memory_pending event missing message_id; skipping');
+                } else {
+                  const memoryMsg: ChatMessage = {
+                    id: String(serverMsgId),
+                    role: 'assistant',
+                    content: event.memory_action.display_text || '是否记住这条信息？',
+                    action: {
+                      type: 'memory_confirm',
+                      data: event.memory_action,
+                      status: 'pending'
+                    }
+                  };
+                  setMessages(prev => [...prev, memoryMsg]);
+                }
               }
             } catch (e) {
               // Ignore parse errors for partial data
@@ -334,13 +342,22 @@ export default function Chat() {
         sleep_impact: 'NONE',
       });
 
-      if (currentSessionId && msg.id && !msg.id.startsWith('temp') && !msg.id.startsWith('error')) {
-        try {
-          await adviceAPI.updateMessage(currentSessionId, parseInt(msg.id), {
-            action_status: 'confirmed',
-          });
-        } catch (e) {
-          console.error('Failed to update message status', e);
+      if (currentSessionId && msg.id) {
+        const numericId = parseInt(msg.id, 10);
+        // 只在 msg.id 是纯数字（server 真实 id）时 PATCH；防御性地跳过 NaN/非正数
+        if (Number.isFinite(numericId) && numericId > 0) {
+          try {
+            await adviceAPI.updateMessage(currentSessionId, numericId, {
+              // 后端 PATCH endpoint 复用了 ChatMessageCreate schema（role/content 必填），
+              // 但 handler 实际只读 action_status/action_data。这里带上 role/content 占位
+              // 才能通过 schema 校验。等后端改成 ChatMessageUpdate 后可去掉。
+              role: msg.role,
+              content: msg.content,
+              action_status: 'confirmed',
+            });
+          } catch (e) {
+            console.error('Failed to update message status', e);
+          }
         }
       }
 
@@ -375,13 +392,22 @@ export default function Chat() {
     try {
       await profileAPI.update(msg.action.data.updates);
 
-      if (currentSessionId && msg.id && !msg.id.startsWith('temp') && !msg.id.startsWith('error')) {
-        try {
-          await adviceAPI.updateMessage(currentSessionId, parseInt(msg.id), {
-            action_status: 'confirmed',
-          });
-        } catch (e) {
-          console.error('Failed to update message status', e);
+      if (currentSessionId && msg.id) {
+        const numericId = parseInt(msg.id, 10);
+        // 只在 msg.id 是纯数字（server 真实 id）时 PATCH；防御性地跳过 NaN/非正数
+        if (Number.isFinite(numericId) && numericId > 0) {
+          try {
+            await adviceAPI.updateMessage(currentSessionId, numericId, {
+              // 后端 PATCH endpoint 复用了 ChatMessageCreate schema（role/content 必填），
+              // 但 handler 实际只读 action_status/action_data。这里带上 role/content 占位
+              // 才能通过 schema 校验。等后端改成 ChatMessageUpdate 后可去掉。
+              role: msg.role,
+              content: msg.content,
+              action_status: 'confirmed',
+            });
+          } catch (e) {
+            console.error('Failed to update message status', e);
+          }
         }
       }
 
@@ -412,13 +438,22 @@ export default function Chat() {
         status: 'active',
       });
 
-      if (currentSessionId && msg.id && !msg.id.startsWith('temp') && !msg.id.startsWith('error')) {
-        try {
-          await adviceAPI.updateMessage(currentSessionId, parseInt(msg.id), {
-            action_status: 'confirmed',
-          });
-        } catch (e) {
-          console.error('Failed to update message status', e);
+      if (currentSessionId && msg.id) {
+        const numericId = parseInt(msg.id, 10);
+        // 只在 msg.id 是纯数字（server 真实 id）时 PATCH；防御性地跳过 NaN/非正数
+        if (Number.isFinite(numericId) && numericId > 0) {
+          try {
+            await adviceAPI.updateMessage(currentSessionId, numericId, {
+              // 后端 PATCH endpoint 复用了 ChatMessageCreate schema（role/content 必填），
+              // 但 handler 实际只读 action_status/action_data。这里带上 role/content 占位
+              // 才能通过 schema 校验。等后端改成 ChatMessageUpdate 后可去掉。
+              role: msg.role,
+              content: msg.content,
+              action_status: 'confirmed',
+            });
+          } catch (e) {
+            console.error('Failed to update message status', e);
+          }
         }
       }
 

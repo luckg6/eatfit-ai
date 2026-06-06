@@ -19,5 +19,9 @@ class MemoryItem(Base):
     updated_at = Column(DateTime, nullable=False, default=func.now(), onupdate=func.now())
     last_used_at = Column(DateTime, nullable=True)
     metadata_json = Column(JSON, nullable=True)
+    # embedding 是 pgvector 列；ORM 不直接持有此列，通过 MemoryTools 走 raw SQL 读写
+    # 这里保留字段名以供业务代码引用
+    embedding_status = Column(String(32), nullable=False, default="pending")
+    embedding_updated_at = Column(DateTime, nullable=True)
 
     user = relationship("User", back_populates="memories")

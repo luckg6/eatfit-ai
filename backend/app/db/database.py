@@ -34,9 +34,11 @@ def init_db():
         raise Exception(
             f"Cannot connect to database. Error: {str(e)}\n\n"
             "Please ensure:\n"
-            "1. MySQL is running (docker compose up -d mysql)\n"
-            "2. backend/sql/init.sql has been executed\n\n"
+            "1. PostgreSQL 17 is running on localhost:5432\n"
+            "2. eatfit_ai database exists and vector extension is enabled\n\n"
             "To initialize the database, run:\n"
-            "mysql -uroot -p123456 < backend/sql/init.sql\n\n"
+            "PGPASSWORD=root psql -U postgres -h localhost -d eatfit_ai "
+            "-f backend/sql/pg/init_pg.sql\n"
+            "psql -U postgres -h localhost -d eatfit_ai -c 'CREATE EXTENSION IF NOT EXISTS vector;'\n\n"
             "See README.md for detailed setup instructions."
         )

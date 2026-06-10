@@ -94,10 +94,14 @@ eatfit-ai/
 │   │   ├── tools/            # profile/memory/meal/chat/restaurant tools, mcp_client
 │   │   └── main.py           # FastAPI 入口
 │   ├── sql/
-│   │   ├── init.sql          # 旧 MySQL 建表（保留参考）
-│   │   ├── migrations/       # 旧 MySQL 增量迁移（001-003）
+│   │   ├── init.sql          # 旧 MySQL 建表（仅作参考，新部署用不到）
+│   │   ├── migrations/       # 旧 MySQL 增量迁移
+│   │   │   ├── 001_add_chat_messages.sql
+│   │   │   ├── 002_enhance_memory_and_meal_tables.sql
+│   │   │   ├── 003_add_restaurant_context.sql
+│   │   │   └── 004_harden_memory_items.sql   # CHECK + 触发器 + 索引，已并入 init_pg.sql
 │   │   └── pg/               # 新 PG 体系
-│   │       ├── init_pg.sql                    # PG + pgvector 建表（vector(1024)）
+│   │       ├── init_pg.sql                    # PG + pgvector 建表（vector(1024)，含 004 全部硬化项）
 │   │       ├── migrate_mysql_to_pg.py         # MySQL -> PG 全量迁移
 │   │       └── backfill_embeddings.py         # 批量回填 embedding
 │   ├── requirements.txt
@@ -159,11 +163,19 @@ docker exec eatfit-pg psql -U postgres -d eatfit_ai -c "CREATE EXTENSION IF NOT 
 
 ### 2️⃣ 初始化数据库表结构
 
+新装只需要执行 `init_pg.sql` 这一个文件就够了 —— 它已经把 `001-003` 的旧迁移和 `004_harden_memory_items.sql` 的全部 CHECK 约束 / `memory_items_touch_updated_at` 触发器 / `idx_memory_user_status_last_used` `idx_memory_embedding_pending` `idx_memory_source_message` 等索引固化进了建表语句。
+
 ```bash
+# 0) 确保 vector 扩展已启用（用本地 PG 时是这一行；用 pgvector/pgvector 镜像可跳过）
+psql -U postgres -h localhost -d eatfit_ai -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+# 1) 建全部表 + 约束 + 触发器 + 索引（idempotent，可重复跑）
 PGPASSWORD=root psql -U postgres -h localhost -d eatfit_ai -f backend/sql/pg/init_pg.sql
 ```
 
-> 如果是从旧 MySQL 迁过来的：**先**在 PG 上跑 `init_pg.sql`，**再**用 `backend/sql/pg/migrate_mysql_to_pg.py` 把数据搬过来，最后跑 `backfill_embeddings.py` 回填向量。
+执行完后会得到 10 张表：`users` / `user_food_profiles` / `memory_items`（含 `vector(1024)`）/ `meal_logs` / `advice_sessions` / `chat_messages` / `weight_records` / `body_fat_records` / `training_records` / `diet_advice_records`。
+
+> 如果是从旧 MySQL 迁过来的：**先**在 PG 上跑 `init_pg.sql`，**再**用 `backend/sql/pg/migrate_mysql_to_pg.py` 把数据搬过来，最后跑 `backfill_embeddings.py` 回填向量。详见 [🔄 数据迁移（MySQL → PostgreSQL）](#-数据迁移mysql--postgresql)。
 
 ### 3️⃣ 启动本地 Ollama 并拉取 embedding 模型
 
@@ -207,15 +219,49 @@ MEMORY_IMPORTANCE_WEIGHT=0.4
 # 百度地图（可选，用于餐厅搜索）
 BAIDU_MAP_AK=your-baidu-map-api-key
 
-# CORS
-FRONTEND_ORIGIN=http://localhost:5173
+# CORS（前端跑在 HTTPS 时要改成 https，否则浏览器拒绝跨域）
+FRONTEND_ORIGIN=https://localhost:5173
 ```
+
+> `app/main.py` 里 CORS 默认还兜底放行了 `http://localhost:5173` 和 `http://localhost:3000`，但既然 `vite` 默认走 HTTPS，配 `https://localhost:5173` 是最安全的姿势。
 
 ### 5️⃣ 安装依赖并启动后端
 
+后端需要 Python 3.11+。建议先建一个 venv，避免污染全局环境。
+
 ```bash
 cd backend
+python -m venv .venv
+
+# Linux / macOS
+source .venv/bin/activate
+# Windows (Git Bash) — 仓库目前在 Win 上开发
+source .venv/Scripts/activate
+
 pip install -r requirements.txt
+```
+
+`requirements.txt` 实际锁的版本（与 README 顶部技术栈表一一对应）：
+
+```
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+sqlalchemy==2.0.25
+pymysql==1.1.0              # 仅用于跑 migrate_mysql_to_pg.py，新部署用不到
+cryptography==42.0.2
+pydantic==2.6.1
+pydantic-settings==2.1.0
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-dotenv==1.0.1
+httpx==0.26.0               # LLM HTTP / Ollama embedding 都靠它
+mcp==1.0.0                  # 百度地图 MCP client
+psycopg[binary]==3.2.3      # PG + pgvector 驱动
+```
+
+启动：
+
+```bash
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -229,7 +275,31 @@ npm install
 npm run dev
 ```
 
-前端运行在 <http://localhost:5173>。
+> ⚠️ `vite.config.ts` 强制启用 HTTPS（`server.https` 指向 `./key.pem` 和 `./cert.pem`），主要是为了让浏览器的 `navigator.geolocation` 在非 localhost 设备上也能拿到 GPS。**第一次跑前必须在 `frontend/` 下放好自签证书**，否则 `vite` 启动会报 `ENOENT: cert.pem`。
+>
+> 用 `mkcert` 一键生成（推荐）：
+> ```bash
+> cd frontend
+> mkcert -install
+> mkcert -key-file key.pem -cert-file cert.pem localhost 127.0.0.1 ::1
+> ```
+>
+> 或者用 OpenSSL：
+> ```bash
+> cd frontend
+> openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 365 -subj "/CN=localhost"
+> ```
+>
+> 启动成功后访问 **<https://localhost:5173>**（注意是 `https`），首次会有自签证书警告，点"继续访问"。`/api` 已通过 vite 代理转发到 `http://localhost:8000`，前端代码里直接写相对路径即可。
+
+前端依赖（来自 `frontend/package.json`）：
+
+| 依赖类型 | 包 |
+|---------|---|
+| dependencies | `react@^18.2`, `react-dom@^18.2`, `react-router-dom@^6.22`, `axios@^1.6.7`, `dayjs@^1.11.10` |
+| devDependencies | `vite@^5.1`, `@vitejs/plugin-react@^4.2`, `typescript@^5.3`, `tailwindcss@^3.4`, `postcss@^8.4`, `autoprefixer@^10.4`, `@types/react@^18.2`, `@types/react-dom@^18.2` |
+
+`package.json` 提供 3 个脚本：`dev`（vite 开发服务器）/ `build`（`tsc && vite build`）/ `preview`（构建产物预览）。
 
 ### 7️⃣（可选）回填历史记忆的向量
 
@@ -454,15 +524,17 @@ embedding 写入失败时把状态置为 `failed`，**不会**让业务写入失
 
 如果已有 MySQL 数据：
 ```bash
-# 1. 在 PG 上跑 init_pg.sql 建表
-PGPASSWORD=root psql -U postgres -h localhost -d eatfit_ai -f backend/sql/pg/init_pg.sql
+# 1. 在 PG 上跑 init_pg.sql 建表（含 vector 扩展、CHECK、触发器、索引）
 psql -U postgres -h localhost -d eatfit_ai -c "CREATE EXTENSION IF NOT EXISTS vector;"
+PGPASSWORD=root psql -U postgres -h localhost -d eatfit_ai -f backend/sql/pg/init_pg.sql
 
-# 2. 跑迁移脚本（脚本顶部 MYSQL/PG 字典里改连接信息，默认 localhost:root/root）
+# 2. 跑迁移脚本
+#    脚本顶部 MYSQL/PG 两个 dict 改成你自己的连接信息再跑；
+#    当前仓库默认 MySQL=root/gy7979829@localhost:3306，PG=postgres/root@localhost:5432
 cd backend
 PYTHONPATH=. python sql/pg/migrate_mysql_to_pg.py
 
-# 3. 回填所有历史 memory 的 embedding
+# 3. 回填所有历史 memory 的 embedding（脚本里也硬编码了 PG=postgres/root@localhost:5432，按需改）
 PYTHONPATH=. python sql/pg/backfill_embeddings.py
 ```
 

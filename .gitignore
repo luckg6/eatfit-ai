@@ -9,3 +9,9 @@ dist/
 .mcp.json
 *.log
 *.pem
+
+# pgvector C source / build artifacts (vendored locally, not in repo)
+pgvector_src/
+
+# ad-hoc API request samples used for manual debugging
+*_req.json

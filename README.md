@@ -99,7 +99,9 @@ eatfit-ai/
 │   │   │   ├── 001_add_chat_messages.sql
 │   │   │   ├── 002_enhance_memory_and_meal_tables.sql
 │   │   │   ├── 003_add_restaurant_context.sql
-│   │   │   └── 004_harden_memory_items.sql   # CHECK + 触发器 + 索引，已并入 init_pg.sql
+│   │   │   ├── 004_harden_memory_items.sql   # CHECK + 触发器 + 索引，已并入 init_pg.sql
+│   │   │   ├── 005_drop_restaurant_context.sql  # 删除 dead-state 字段，餐厅数据走 chat_messages.action_data
+│   │   │   └── 006_drop_user_question.sql       # 删除冗余字段（与 title 内容重复，前端只读 title）
 │   │   └── pg/               # 新 PG 体系
 │   │       ├── init_pg.sql                    # PG + pgvector 建表（vector(1024)，含 004 全部硬化项）
 │   │       ├── migrate_mysql_to_pg.py         # MySQL -> PG 全量迁移
@@ -407,7 +409,7 @@ LLM_MODEL=your-model
 | `user_food_profiles` | 用户饮食画像（昵称/性别/身高/体重/体脂/目标/活动等级/训练/偏好/不喜欢/过敏/预算/睡眠） |
 | `memory_items` | **长期记忆**（含 `vector(1024)` embedding、`embedding_status` ∈ {pending, ready, failed}、`embedding_updated_at`、JSONB `metadata_json`） |
 | `meal_logs` | 饮食记录（餐次/餐时/食物/场景/估算营养/健康分/睡眠影响/AI 评语） |
-| `advice_sessions` | AI 会话（含 `scenario`、`is_training_day` (BOOLEAN)、`restaurant_context` (JSONB)） |
+| `advice_sessions` | AI 会话（含 `scenario`、`is_training_day` (BOOLEAN)） |
 | `chat_messages` | 会话消息（含 `action_type` / `action_status` / `action_data` (JSONB)） |
 | `weight_records` | 体重记录（`record_date` + `note`） |
 | `body_fat_records` | 体脂记录 |

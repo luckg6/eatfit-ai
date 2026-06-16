@@ -5,18 +5,8 @@ import dayjs from 'dayjs';
 
 const MEMORY_TYPES = [
   { value: '', label: '全部' },
-  { value: 'diet_preference', label: '饮食偏好' },
-  { value: 'food_dislike', label: '不喜欢食物' },
+  { value: 'preference', label: '偏好' },
   { value: 'allergy_intolerance', label: '过敏/不耐受' },
-  { value: 'goal', label: '长期目标' },
-  { value: 'budget', label: '预算偏好' },
-  { value: 'location', label: '常用位置' },
-  { value: 'scenario', label: '饮食场景' },
-  { value: 'sleep', label: '睡眠相关' },
-  { value: 'body_response', label: '身体反应' },
-  { value: 'restriction', label: '现实限制' },
-  { value: 'habit', label: '饮食习惯' },
-  { value: 'other', label: '其他' },
 ];
 
 const STATUS_OPTIONS = [

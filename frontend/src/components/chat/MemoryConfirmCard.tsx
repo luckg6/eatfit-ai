@@ -20,21 +20,11 @@ export default function MemoryConfirmCard({
   const isDark = theme === 'dark';
   const memoryTypeNames: Record<string, string> = {
     allergy_intolerance: "过敏/不耐受",
-    diet_preference: "饮食偏好",
-    food_dislike: "不喜欢食物",
-    goal: "长期目标",
-    budget: "预算偏好",
-    location: "常用位置",
-    scenario: "饮食场景",
-    sleep: "睡眠相关",
-    body_response: "身体反应",
-    restriction: "现实限制",
-    habit: "饮食习惯",
-    other: "其他",
+    preference: "偏好",
   };
 
   const typeName = memoryTypeNames[memoryAction.memory_type] || memoryAction.memory_type;
-  const isHighImportance = ["allergy_intolerance", "body_response", "goal", "restriction"].includes(memoryAction.memory_type);
+  const isHighImportance = memoryAction.memory_type === "allergy_intolerance";
 
   return (
     <div className={`ml-10 rounded-lg px-4 py-3 max-w-xs border ${isDark ? 'bg-amber-900/20 border-amber-700/30' : 'bg-amber-50 border-amber-200'}`}>

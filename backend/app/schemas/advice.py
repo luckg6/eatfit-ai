@@ -43,17 +43,6 @@ class AdviceResponse(BaseModel):
     one_sentence_summary: str
 
 
-class AdviceSessionResponse(BaseModel):
-    id: int
-    title: Optional[str]
-    user_question: str
-    context_text: Optional[str]
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
 class DailyPlanRequest(BaseModel):
     is_training_day: bool = False
 
@@ -136,13 +125,3 @@ class SendMessageResponse(BaseModel):
     message_id: int
     response: AdviceResponse
     pending_meal_action: Optional[dict] = None
-
-
-class RestaurantDetailRequest(BaseModel):
-    uid: str
-    name: str
-    address: Optional[str] = None
-
-
-class RestaurantDetailResponse(BaseModel):
-    content: str

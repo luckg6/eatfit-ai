@@ -9,14 +9,11 @@ class AdviceSession(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     user_id = Column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     title = Column(String(255))
-    user_question = Column(Text)
     context_text = Column(Text)
     ai_response_json = Column(JSON)
     scenario = Column(String(64), default="OTHER")
     # 修复 boolean 映射: MySQL 时代是 tinyint(1)，PG 端是 BOOLEAN
     is_training_day = Column(Boolean, default=False)
-    # Stores restaurant search results for the session (used when user selects a restaurant)
-    restaurant_context = Column(JSON, default=dict)
     created_at = Column(DateTime, nullable=False, default=func.now())
     updated_at = Column(DateTime, nullable=False, default=func.now(), onupdate=func.now())
 

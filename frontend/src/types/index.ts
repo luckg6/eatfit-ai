@@ -195,6 +195,13 @@ export interface ChatMessage {
   content: string;
   created_at?: string;
   action?: ChatAction;
+  // True while the assistant message is still being streamed.
+  // When true, the bubble renders the inline thinking trace instead of content.
+  // Replaced by the real content once `message_done` / `action_pending` arrives.
+  streaming?: boolean;
+  // The trace steps that the agent has emitted for this message so far.
+  // Persisted after the stream ends so the user can re-open it on the message.
+  trace?: AgentStep[];
 }
 
 // Agent trace types

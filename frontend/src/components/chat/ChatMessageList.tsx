@@ -4,6 +4,7 @@ import MealLogConfirmCard from './MealLogConfirmCard';
 import ProfileUpdateConfirmCard from './ProfileUpdateConfirmCard';
 import MemoryConfirmCard from './MemoryConfirmCard';
 import RestaurantConfirmCard from './RestaurantConfirmCard';
+import ThinkingBubble from './AgentTracePanel';
 
 interface ChatMessageListProps {
   messages: ChatMessage[];
@@ -89,8 +90,63 @@ export default function ChatMessageList({
                 <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 mt-1 ${isDark ? 'bg-gray-700' : 'bg-primary-100'}`}>
                   <span className="text-sm">🍽️</span>
                 </div>
-                <div className={`px-4 py-3 rounded-2xl rounded-bl-md border ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200 shadow-sm'}`}>
-                  <p className={`text-sm whitespace-pre-wrap leading-relaxed ${isDark ? 'text-gray-200' : 'text-gray-700'}`}>{msg.content}</p>
+                <div
+                  className={`px-4 py-3 rounded-2xl rounded-bl-md border space-y-2 ${
+                    isDark
+                      ? 'bg-gray-800 border-gray-700'
+                      : 'bg-white border-gray-200 shadow-sm'
+                  }`}
+                >
+                  {/* 思考过程：streaming 时总是展开；流结束后折叠为小按钮。 */}
+                  {msg.streaming && (
+                    <ThinkingBubble
+                      steps={msg.trace || []}
+                      isStreaming={true}
+                      theme={theme}
+                    />
+                  )}
+                  {!msg.streaming && msg.trace && msg.trace.length > 0 && (
+                    <details
+                      className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}
+                    >
+                      <summary
+                        className={`list-none cursor-pointer select-none flex items-center gap-1.5 hover:${
+                          isDark ? 'text-gray-300' : 'text-gray-700'
+                        }`}
+                      >
+                        <span>⚡</span>
+                        <span>查看思考过程</span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded-full text-[10px] font-medium ${
+                            isDark
+                              ? 'bg-gray-700/60 text-gray-300'
+                              : 'bg-gray-200 text-gray-600'
+                          }`}
+                        >
+                          {msg.trace.length} 步
+                        </span>
+                      </summary>
+                      <div className="mt-2">
+                        <ThinkingBubble
+                          steps={msg.trace}
+                          isStreaming={false}
+                          theme={theme}
+                        />
+                      </div>
+                    </details>
+                  )}
+
+                  {/* 实际正文：流式时为空文本（仅展示思考过程），
+                      流结束后由父组件用真实 content 替换占位。 */}
+                  {msg.content && (
+                    <p
+                      className={`text-sm whitespace-pre-wrap leading-relaxed ${
+                        isDark ? 'text-gray-200' : 'text-gray-700'
+                      }`}
+                    >
+                      {msg.content}
+                    </p>
+                  )}
                 </div>
               </div>
             </div>

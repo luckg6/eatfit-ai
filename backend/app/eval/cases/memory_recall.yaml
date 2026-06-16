@@ -1,0 +1,354 @@
+# Memory-recall golden cases
+#
+# Two parallel test sets:
+#   A) user_id=1 (legacy): 8 hand-written cases, kept for regression detection.
+#                           These test the agent works against the original
+#                           prod data.
+#   B) user_id=10 (sandbox): 30+ cases against the eval sandbox user
+#                            (scripts/seed_eval_sandbox.py). These came from
+#                            the LLM generator (scripts/generate_eval_cases.py)
+#                            but were **manually reviewed** before merging in —
+#                            the review gate is the only thing preventing
+#                            garbage cases from poisoning the eval set.
+#
+# Memory types are consolidated to two (migration 009):
+#   - allergy_intolerance : medical hard constraint (always HIGH_IMPORTANCE)
+#   - preference          : everything else
+#
+# sandbox user_id=10 has these active memories as of 2026-06-15:
+#   32 preference          不吃香菜                          importance=8
+#   33 preference          不吃苦瓜                          importance=7
+#   34 preference          不吃肥肠                          importance=7
+#   35 preference          不吃动物内脏                      importance=6
+#   36 preference          不吃辣                            importance=7
+#   37 preference          不喝含糖饮料                      importance=6
+#   38 preference          饮食偏好清淡口味                  importance=7
+#   39 preference          健身增肌期，需要高蛋白            importance=8
+#   40 preference          预算每餐 30 元以内                importance=5
+#   41 preference          晚上 8 点后不吃主食                importance=6
+#   42 allergy_intolerance 乳糖不耐受                        importance=9
+#   43 allergy_intolerance 海鲜过敏                          importance=9
+#   44 allergy_intolerance 花生过敏                          importance=9
+#   45 allergy_intolerance 鸡蛋过敏                          importance=8
+#   46 allergy_intolerance 麸质过敏                          importance=7
+#   47 allergy_intolerance 芒果过敏                          importance=7
+#   48 allergy_intolerance 坚果过敏                          importance=9
+#   49 allergy_intolerance 酒精过敏                          importance=8
+#
+# Run:
+#   PYTHONPATH=. python -m app.eval.runner                              # default user_id=1
+#   PYTHONPATH=. python -m app.eval.runner --user-id 10                # sandbox
+#   PYTHONPATH=. python -m app.eval.runner --user-id 10 --k 3,5,10     # sandbox, custom K
+
+cases:
+
+  # =============================================================
+  # SECTION A — legacy hand-written cases for user_id=1
+  # =============================================================
+
+  # --- allergy_intolerance recall ---
+  - case_id: lactose_after_dairy_symptom
+    user_id: 1
+    intent: diet_advice
+    query: "刚喝了奶茶，胃有点不舒服"
+    relevant_memory_ids: [6]
+    relevant_types: [allergy_intolerance]
+    notes: "乳糖不耐受应该被召回"
+
+  - case_id: peanut_anxiety_recall
+    user_id: 1
+    intent: diet_advice
+    query: "今天同事带了花生糖，怕吃到"
+    relevant_memory_ids: [9]
+    relevant_types: [allergy_intolerance]
+    notes: "严重过敏，importance=9 应该排前"
+
+  - case_id: seafood_dinner_recall
+    user_id: 1
+    intent: diet_advice
+    query: "晚上请客点什么菜好"
+    relevant_memory_ids: [7]
+    relevant_types: [allergy_intolerance]
+    notes: "海鲜过敏应该在请客场景召回"
+
+  # --- preference recall ---
+  - case_id: cilantro_avoid_recommendation
+    user_id: 1
+    intent: diet_advice
+    query: "推荐个轻食外卖"
+    relevant_memory_ids: [1]
+    relevant_types: [preference]
+    notes: "不吃香菜是经典 dislike 测试"
+
+  - case_id: bitter_melon_mention
+    user_id: 1
+    intent: diet_advice
+    query: "中午想吃青菜"
+    relevant_memory_ids: [4]
+    relevant_types: [preference]
+    notes: "苦瓜 dislike 权重=8，期望召回"
+
+  - case_id: light_flavor_preference
+    user_id: 1
+    intent: diet_advice
+    query: "中午想吃点清淡的"
+    relevant_memory_ids: [5]
+    relevant_types: [preference]
+    notes: "清淡口味偏好"
+
+  # --- multi-constraint aggregation ---
+  - case_id: dinner_with_allergy_constraints
+    user_id: 1
+    intent: diet_advice
+    query: "晚上食堂吃什么"
+    relevant_memory_ids: [6, 7, 9, 1]
+    relevant_types: [allergy_intolerance, preference]
+    notes: "top-K 应同时召回所有过敏/不喜欢；综合测试"
+
+  # --- meal_log intent ---
+  - case_id: meal_log_at_canteen
+    user_id: 1
+    intent: meal_log
+    query: "中午在食堂吃了番茄鸡蛋盖饭"
+    relevant_memory_ids: []
+    relevant_types: []
+    notes: "meal_log 召回偏好用于上下文；空 ground truth"
+
+  # =============================================================
+  # SECTION B — sandbox user_id=10, LLM-generated + human-reviewed
+  # =============================================================
+
+  # --- allergy_intolerance paraphrase (symptom-based, not literal) ---
+  - case_id: lactose_symptom_after_drink
+    user_id: 10
+    intent: diet_advice
+    query: "每次喝完牛奶就拉肚子胀气，太难受了"
+    relevant_memory_ids: [42]
+    relevant_types: [allergy_intolerance]
+    notes: "review: 优秀 paraphrase — 描述症状而非直接说'乳糖不耐受'"
+
+  - case_id: seafood_symptom_lip_swell
+    user_id: 10
+    intent: diet_advice
+    query: "吃了一口虾嘴唇就肿了"
+    relevant_memory_ids: [43]
+    relevant_types: [allergy_intolerance]
+    notes: "review: 症状描述 paraphrase，期望召回 海鲜过敏"
+
+  - case_id: peanut_symptom_pb_rash
+    user_id: 10
+    intent: diet_advice
+    query: "上次吃了点花生酱嘴唇就肿了"
+    relevant_memory_ids: [44]
+    relevant_types: [allergy_intolerance]
+    notes: "review: 花生酱症状 paraphrase，期望召回 花生过敏"
+
+  - case_id: gluten_symptom_itchy_skin
+    user_id: 10
+    intent: diet_advice
+    query: "每次吃面包面条皮肤就发痒"
+    relevant_memory_ids: [46]
+    relevant_types: [allergy_intolerance]
+    notes: "review: 麸质症状 paraphrase，期望召回 麸质过敏"
+
+  - case_id: mango_symptom_mouth_swell
+    user_id: 10
+    intent: diet_advice
+    query: "吃了芒果嘴肿了一圈"
+    relevant_memory_ids: [47]
+    relevant_types: [allergy_intolerance]
+    notes: "review: 芒果症状 paraphrase"
+
+  - case_id: alcohol_symptom_full_body_rash
+    user_id: 10
+    intent: diet_advice
+    query: "喝完酒全身起红疹子太难受了"
+    relevant_memory_ids: [49]
+    relevant_types: [allergy_intolerance]
+    notes: "review: 酒精症状 paraphrase"
+
+  - case_id: egg_symptom_mouth_swell
+    user_id: 10
+    intent: diet_advice
+    query: "吃了鸡蛋嘴巴会肿起疹子"
+    relevant_memory_ids: [45]
+    relevant_types: [allergy_intolerance]
+    notes: "review: 鸡蛋症状 paraphrase"
+
+  # --- preference paraphrase ---
+  - case_id: cilantro_smell_dislike
+    user_id: 10
+    intent: diet_advice
+    query: "香菜那个味道我实在受不了，闻到就想吐"
+    relevant_memory_ids: [32]
+    relevant_types: [preference]
+    notes: "review: 嗅觉感受 paraphrase，不直接说'不吃香菜'"
+
+  - case_id: bitter_melon_cant_swallow
+    user_id: 10
+    intent: diet_advice
+    query: "每次看到苦瓜都下不了口，能不能推荐点别的"
+    relevant_memory_ids: [33]
+    relevant_types: [preference]
+    notes: "review: 心理描写 paraphrase"
+
+  - case_id: intestine_smell_dislike
+    user_id: 10
+    intent: diet_advice
+    query: "每次闻到肥肠那个味就想吐"
+    relevant_memory_ids: [34]
+    relevant_types: [preference]
+    notes: "review: 嗅觉 paraphrase"
+
+  - case_id: organ_meat_skip_menu
+    user_id: 10
+    intent: diet_advice
+    query: "每次看到菜单上有猪肝羊腰就想划走"
+    relevant_memory_ids: [35]
+    relevant_types: [preference]
+    notes: "review: 行为描写 paraphrase，期望召回 不吃动物内脏"
+
+  - case_id: spicy_stomach_uncomfortable
+    user_id: 10
+    intent: diet_advice
+    query: "一吃辣胃就不舒服"
+    relevant_memory_ids: [36]
+    relevant_types: [preference]
+    notes: "review: 症状 paraphrase（不是过敏，是 preference）"
+
+  - case_id: sugary_drinks_too_greasy
+    user_id: 10
+    intent: diet_advice
+    query: "甜的东西喝着总觉得太腻了受不了"
+    relevant_memory_ids: [37]
+    relevant_types: [preference]
+    notes: "review: 感受 paraphrase，期望召回 不喝含糖饮料"
+
+  - case_id: heavy_food_feels_bad
+    user_id: 10
+    intent: diet_advice
+    query: "每次吃完重口味的饭就感觉整个人都不舒服"
+    relevant_memory_ids: [38]
+    relevant_types: [preference]
+    notes: "review: 体验 paraphrase，期望召回 清淡口味偏好"
+
+  - case_id: post_workout_protein_need
+    user_id: 10
+    intent: diet_advice
+    query: "刚练完腿特别想吃点肉补充营养"
+    relevant_memory_ids: [39]
+    relevant_types: [preference]
+    notes: "review: 场景 paraphrase，期望召回 高蛋白需求"
+
+  - case_id: late_night_no_carbs
+    user_id: 10
+    intent: diet_advice
+    query: "加班到很晚肚子饿，但又不想吃米饭面条"
+    relevant_memory_ids: [41]
+    relevant_types: [preference]
+    notes: "review: 场景 paraphrase，期望召回 晚上 8 点后不吃主食"
+
+  # --- query-style (asking for recommendation, should still pull relevant memories) ---
+  - case_id: lactose_no_dairy_recommendation
+    user_id: 10
+    intent: diet_advice
+    query: "有没有无乳糖的餐厅推荐啊"
+    relevant_memory_ids: [42]
+    relevant_types: [allergy_intolerance]
+    notes: "review: 提问式，期望通过'乳糖'/'无乳糖'召回"
+
+  - case_id: nut_free_restaurant_query
+    user_id: 10
+    intent: diet_advice
+    query: "中午和朋友约饭，不知道有什么坚果过敏也能放心吃的餐厅推荐吗"
+    relevant_memory_ids: [48]
+    relevant_types: [allergy_intolerance]
+    notes: "review: 提问式 paraphrase，提及'过敏+餐厅推荐'，期望召回 坚果过敏"
+
+  - case_id: high_protein_delivery_query
+    user_id: 10
+    intent: diet_advice
+    query: "附近有什么高蛋白的外卖可以点"
+    relevant_memory_ids: [39]
+    relevant_types: [preference]
+    notes: "review: 提问式 paraphrase，期望通过'高蛋白'召回 健身增肌记忆"
+
+  - case_id: budget_friendly_query
+    user_id: 10
+    intent: diet_advice
+    query: "附近有什么便宜又好吃还实惠的推荐"
+    relevant_memory_ids: [40]
+    relevant_types: [preference]
+    notes: "review: 提问式 paraphrase，期望召回 预算 30 元"
+
+  # --- negatives (true negatives — recall SHOULD return [] or non-matching) ---
+  # These test the "don't recall" property. Cases where retriever should
+  # ideally return 0 matches or only the most-related preference,
+  # NOT the listed memory.
+  - case_id: nut_negative_irrelevant_topic
+    user_id: 10
+    intent: diet_advice
+    query: "今天想吃点水果"
+    relevant_memory_ids: []
+    relevant_types: []
+    notes: "review: 真负例，'水果'跟 坚果过敏 不该被召回到"
+
+  - case_id: lactose_negative_irrelevant_question
+    user_id: 10
+    intent: diet_advice
+    query: "牛奶可以补钙吗"
+    relevant_memory_ids: []
+    relevant_types: []
+    notes: "review: 真负例，'牛奶可以补钙吗'是询问营养知识，不该召回 乳糖不耐受"
+
+  - case_id: preference_negative_unrelated_food
+    user_id: 10
+    intent: diet_advice
+    query: "重口味菜品推荐"
+    relevant_memory_ids: []
+    relevant_types: []
+    notes: "review: 真负例，'重口味'跟 清淡口味偏好 相反，不该召回"
+
+  - case_id: alcohol_negative_wine_glasses
+    user_id: 10
+    intent: diet_advice
+    query: "喝白酒一般用什么杯子"
+    relevant_memory_ids: []
+    relevant_types: []
+    notes: "review: 真负例，询问酒具知识，不该召回 酒精过敏"
+
+  - case_id: cilantro_negative_how_to_cut
+    user_id: 10
+    intent: diet_advice
+    query: "香菜怎么切才好吃"
+    relevant_memory_ids: []
+    relevant_types: []
+    notes: "review: 真负例，烹饪技巧问题，不该召回 不吃香菜"
+
+  # --- high-stakes positives (user reports consuming allergen → MUST recall warning) ---
+  # These were mislabeled as negative by the LLM but reviewer caught: when user
+  # reports eating an allergen, the agent MUST recall the allergy to warn them.
+  - case_id: egg_high_stakes_user_consumed_allergen
+    user_id: 10
+    intent: diet_advice
+    query: "今天早餐吃了鸡蛋"
+    relevant_memory_ids: [45]
+    relevant_types: [allergy_intolerance]
+    notes: "review: LLM 标为负例，实际是正例——用户吃了过敏原，必须召回警告"
+
+  # --- cross-type disambiguation (test the agent picks the right memory) ---
+  - case_id: cross_type_picky_meal
+    user_id: 10
+    intent: diet_advice
+    query: "中午想吃点清淡的、还能避开鸡蛋的"
+    relevant_memory_ids: [38, 45]
+    relevant_types: [preference, allergy_intolerance]
+    notes: "review: 跨 type 综合 query，期望同时召回 清淡口味 + 鸡蛋过敏"
+
+  - case_id: cross_type_budget_with_allergy
+    user_id: 10
+    intent: diet_advice
+    query: "30块以内能吃什么？我对海鲜过敏"
+    relevant_memory_ids: [40, 43]
+    relevant_types: [preference, allergy_intolerance]
+    notes: "review: 跨 type 综合 query，期望同时召回 预算 + 海鲜过敏"

@@ -40,9 +40,8 @@ class RestaurantTools:
         """
         client = get_baidu_map_client()
 
-        # 如果传入的是文字地址（不是 lat,lng 坐标），需要先地理编码
+        # If location is a text address (not lat,lng), geocode first
         if location and not re.match(r"^-?\d+\.?\d*,-?\d+\.?\d*$", location):
-            # 这是一个文字地址，需要地理编码
             logger.info(f"[RestaurantTools] location is text address, geocoding: {location}")
             geocode_result = await client.geocode(location)
             if geocode_result and geocode_result.get("location", {}).get("lat", 0) != 0:
@@ -54,7 +53,7 @@ class RestaurantTools:
                 logger.warning(f"[RestaurantTools] geocode failed for '{location}', falling back to IP location")
                 location = None
 
-        # 优先使用用户传入的位置，否则用 IP 定位
+        # Use IP-based location if user-provided one was missing
         if not location:
             ip_result = await client.ip_location()
             logger.info(f"[RestaurantTools] ip_result: {ip_result}")
@@ -62,7 +61,6 @@ class RestaurantTools:
                 district = ip_result.get("district", "")
                 city = ip_result.get("city", "")
                 if district:
-                    # 用区名政府地址地理编码
                     geocode_result = await client.geocode(f"成都市郫都区人民政府")
                     logger.info(f"[RestaurantTools] geocode raw result: {geocode_result}")
                     if geocode_result and geocode_result.get("location", {}).get("lat", 0) != 0:
@@ -80,7 +78,6 @@ class RestaurantTools:
         if not region:
             region = "北京"  # Default fallback
 
-        # Search via Baidu Map MCP
         results = await client.search_places(
             query=query,
             region=region,
@@ -88,7 +85,6 @@ class RestaurantTools:
             radius=5000,
         )
 
-        # Format results for the agent
         restaurants = []
         for item in results[:limit]:
             restaurants.append({
@@ -110,23 +106,3 @@ class RestaurantTools:
         """Get detailed restaurant info by UID."""
         client = get_baidu_map_client()
         return await client.get_place_details(uid)
-
-    async def format_restaurant_for_display(self, restaurant: Dict[str, Any]) -> str:
-        """Format a restaurant for display in chat."""
-        name = restaurant.get("name", "未知")
-        address = restaurant.get("address", "")
-        rating = restaurant.get("overall_rating")
-        tag = restaurant.get("tag", "")
-        price = restaurant.get("price_level")
-
-        parts = [f"**{name}**"]
-        if tag:
-            parts.append(f"标签: {tag}")
-        if rating:
-            parts.append(f"评分: {rating}分")
-        if price:
-            parts.append(f"价位: {price}")
-        if address:
-            parts.append(f"地址: {address}")
-
-        return " | ".join(parts)

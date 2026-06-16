@@ -3,7 +3,7 @@ from app.schemas.profile import UserFoodProfileBase, UserFoodProfileResponse, Us
 from app.schemas.memory import MemoryItemBase, MemoryItemResponse, MemoryItemCreate, MemoryItemUpdate, AutoMemoryUpdate
 from app.schemas.meal import MealLogBase, MealLogResponse, MealLogCreate, MealLogUpdate, MealSummary
 from app.schemas.advice import (
-    AdviceRequest, AdviceResponse, AdviceSessionResponse,
+    AdviceRequest, AdviceResponse,
     RecommendedOption, NotRecommendedOption,
     DailyPlanRequest, DailyPlanResponse, WeeklyReviewResponse
 )
@@ -18,7 +18,7 @@ __all__ = [
     "UserFoodProfileBase", "UserFoodProfileResponse", "UserFoodProfileUpdate",
     "MemoryItemBase", "MemoryItemResponse", "MemoryItemCreate", "MemoryItemUpdate", "AutoMemoryUpdate",
     "MealLogBase", "MealLogResponse", "MealLogCreate", "MealLogUpdate", "MealSummary",
-    "AdviceRequest", "AdviceResponse", "AdviceSessionResponse",
+    "AdviceRequest", "AdviceResponse",
     "RecommendedOption", "NotRecommendedOption",
     "DailyPlanRequest", "DailyPlanResponse", "WeeklyReviewResponse",
     "WeightRecordBase", "WeightRecordResponse",

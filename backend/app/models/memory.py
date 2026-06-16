@@ -23,5 +23,10 @@ class MemoryItem(Base):
     # 这里保留字段名以供业务代码引用
     embedding_status = Column(String(32), nullable=False, default="pending")
     embedding_updated_at = Column(DateTime, nullable=True)
+    # jieba-segmented text (migration 008). Used as the source for content_tsv
+    # so 'simple' tsvector config indexes real words instead of single CJK chars.
+    content_zh = Column(Text, nullable=True)
+    # content_tsv intentionally NOT in the ORM: managed by a BEFORE INSERT/UPDATE
+    # trigger (trg_memory_items_refresh_tsv) so direct-SQL writes also stay synced.
 
     user = relationship("User", back_populates="memories")

@@ -65,20 +65,7 @@ export const mealsAPI = {
 };
 
 export const adviceAPI = {
-  generate: (data: {
-    question: string;
-    context?: string;
-    is_training_day: boolean;
-    scenario: string;
-  }) => api.post('/advice/generate', data),
-  getHistory: (limit = 20) => api.get('/advice/history', { params: { limit } }),
-  getSession: (id: number) => api.get(`/advice/history/${id}`),
-  generateDailyPlan: (is_training_day: boolean) =>
-    api.post('/advice/daily-plan', { is_training_day }),
-  generateWeeklyReview: () => api.post('/advice/weekly-review'),
-  // New chat API
-  sendMessage: (data: { message: string; scenario?: string; is_training_day?: boolean; session_id?: number; latitude?: number; longitude?: number }) =>
-    api.post('/advice/send', data),
+  // Chat (ReAct SSE)
   sendMessageStream: (data: { message: string; scenario?: string; is_training_day?: boolean; session_id?: number; latitude?: number; longitude?: number }) => {
     const token = localStorage.getItem('token');
     return fetch('/api/advice/send-stream', {
@@ -90,8 +77,8 @@ export const adviceAPI = {
       body: JSON.stringify(data),
     });
   },
-  getRestaurantDetail: (restaurant: { uid: string; name: string; address?: string }) =>
-    api.post('/advice/restaurant-detail', restaurant),
+
+  // Session lifecycle
   createSession: (data?: { title?: string; scenario?: string; is_training_day?: boolean }) =>
     api.post('/advice/sessions', data || {}),
   getSessions: (limit = 20) => api.get('/advice/sessions', { params: { limit } }),
@@ -101,6 +88,12 @@ export const adviceAPI = {
     api.patch(`/advice/sessions/${sessionId}/messages/${messageId}`, data),
   deleteSession: (sessionId: number) =>
     api.delete(`/advice/sessions/${sessionId}`),
+
+  // History (called by Dashboard for "recent advice" widget)
+  getHistory: (limit = 20) => api.get('/advice/history', { params: { limit } }),
+
+  // Weekly review (called by WeeklyReview page)
+  generateWeeklyReview: () => api.post('/advice/weekly-review'),
 };
 
 export const weightsAPI = {

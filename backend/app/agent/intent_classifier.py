@@ -1,18 +1,23 @@
 """
 Intent classification for user messages.
-Rule-based pattern matching as the fast path.
-LLM-based classification happens in intent_classifier_llm.py for ambiguous cases.
-"""
 
+Two-stage:
+  1) Rule-based pattern matching (fast path, zero LLM cost)
+  2) LLM-based classifier (fallback for ambiguous cases or context-dependent
+     utterances like ellipsis / anaphora)
+
+The LLM path accepts `recent_messages` so it can disambiguate references like
+"那个多少卡？" (refers to a meal from the previous turn). It is not currently
+wired into the orchestrator — see `classify_with_llm` for the entry point.
+"""
 import re
-from enum import Enum
-from typing import Optional, Dict, Any, Tuple, List
 from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class Intent(Enum):
     MEAL_LOG = "meal_log"
-    DIET_ADVICE = "diet_advice"
     PROFILE_UPDATE = "profile_update"
     MEMORY_CANDIDATE = "memory_candidate"
     DASHBOARD_QUERY = "dashboard_query"
@@ -28,22 +33,16 @@ class IntentResult:
     metadata: Dict[str, Any] = None
 
 
-# Rule patterns for intent classification
+# ----------------------------------------------------------------------
+# Rule-based patterns (fast path)
+# ----------------------------------------------------------------------
+
 MEAL_LOG_PATTERNS = [
     (r"刚吃|吃了|吃过|吃完|就吃|吃了点|叫了|点了|外卖到了", 0.9),
     (r"(早|午|晚)饭.*吃", 0.85),
     (r"吃了.*饭|吃了.*面|吃了.*包|吃了.*粉|吃了.*菜", 0.85),
     (r"摄入了|摄取了|摄取了.*热量", 0.8),
     (r"记录.*餐?|记.*吃了", 0.8),
-]
-
-DIET_ADVICE_PATTERNS = [
-    (r"吃什么|晚饭.*好|午饭.*好|早饭.*好", 0.85),
-    (r"推荐.*食物|推荐.*餐|建议.*吃", 0.8),
-    (r"怎么吃|如何吃|怎样吃", 0.75),
-    (r"减脂.*吃|增肌.*吃|健康.*吃", 0.8),
-    (r"今天.*吃|今天.*什么", 0.75),
-    (r"有没有.*推荐|有什么.*推荐", 0.7),
 ]
 
 PROFILE_UPDATE_PATTERNS = [
@@ -108,7 +107,7 @@ def classify_intent_rule_based(text: str) -> Optional[IntentResult]:
                 reasoning=f"Matched meal pattern: {pattern}"
             )
 
-    # Check memory_candidate BEFORE diet_advice to prioritize health constraints (allergy, intolerance)
+    # Check memory_candidate first to prioritize health constraints (allergy, intolerance)
     # e.g. "我有乳糖不耐能吃什么" should first extract the allergy as memory, then give advice
     for pattern, base_confidence in MEMORY_CANDIDATE_PATTERNS:
         if re.search(pattern, text):
@@ -116,15 +115,6 @@ def classify_intent_rule_based(text: str) -> Optional[IntentResult]:
                 intent=Intent.MEMORY_CANDIDATE,
                 confidence=base_confidence,
                 reasoning=f"Matched memory pattern: {pattern}"
-            )
-
-    # Check diet_advice (after memory to allow health constraints to be captured first)
-    for pattern, base_confidence in DIET_ADVICE_PATTERNS:
-        if re.search(pattern, text):
-            return IntentResult(
-                intent=Intent.DIET_ADVICE,
-                confidence=base_confidence,
-                reasoning=f"Matched advice pattern: {pattern}"
             )
 
     # Check profile_update
@@ -188,16 +178,10 @@ def classify_multi(text: str) -> List[Tuple[Intent, float, str]]:
             results.append((Intent.MEAL_LOG, base_confidence, f"Matched meal pattern: {pattern}"))
             break
 
-    # Check memory_candidate (before diet_advice to prioritize health constraints)
+    # Check memory_candidate first to prioritize health constraints
     for pattern, base_confidence in MEMORY_CANDIDATE_PATTERNS:
         if re.search(pattern, text):
             results.append((Intent.MEMORY_CANDIDATE, base_confidence, f"Matched memory pattern: {pattern}"))
-            break
-
-    # Check diet_advice
-    for pattern, base_confidence in DIET_ADVICE_PATTERNS:
-        if re.search(pattern, text):
-            results.append((Intent.DIET_ADVICE, base_confidence, f"Matched advice pattern: {pattern}"))
             break
 
     # Check profile_update
@@ -209,7 +193,7 @@ def classify_multi(text: str) -> List[Tuple[Intent, float, str]]:
     # Check restaurant_search (higher priority for restaurant-specific messages)
     for pattern, base_confidence in RESTAURANT_SEARCH_PATTERNS:
         if re.search(pattern, text):
-            results.append((Intent.RESTAURANT_SEARCH_PLANNED, base_confidence, f"Matched restaurant pattern: {pattern}"))
+            results.append((Intent.RESTAURANT_SEARCH_PLANNED, base_confidence, f"Matched restaurant pattern (Phase 2): {pattern}"))
             break
 
     # Check dashboard_query
@@ -300,3 +284,109 @@ def extract_entities(text: str, intent: Intent) -> Dict[str, Any]:
             entities["primary_goal"] = "SLEEP_IMPROVEMENT"
 
     return entities
+
+
+# ----------------------------------------------------------------------
+# LLM-based classifier (fallback / context-aware)
+# ----------------------------------------------------------------------
+
+LLM_INTENT_SYSTEM_PROMPT = """你是一个意图分类助手。根据用户消息判断真实意图。
+
+可能的意图：
+- meal_log: 用户在记录吃了什么（如"刚吃了牛肉饭"、"记录午餐"）
+- profile_update: 用户明确想更新资料（如"体重是70kg"、"我目标增肌"、"更新身高175"、"长了5斤帮我更新"）
+- memory_candidate: 用户提到值得记住的信息，但不一定是要更新资料（如"我不喜欢吃香菜"、"长了5斤"、"最近睡眠不好"）
+- dashboard_query: 用户在查今日摄入或进度（如"今天吃了多少热量"）
+- general_chat: 闲聊、问建议、推荐、或者无法归类（"吃什么好"、"推荐什么"都归这里，走 LLM ReAct 给出建议）
+
+重要规则：
+1. 明确说"更新"/"帮我改"/"改成"/"记录"体重/身高 → profile_update
+2. "长了X斤"/"重了X斤"/"胖了X斤" 有明确更新意图 → profile_update（不是memory_candidate）
+3. 只有随口说说、没有明确意图（如"我好像胖了"） → memory_candidate
+4. 体重单位：如果用户说"斤"，需要转换为kg（1斤=0.5kg）
+
+返回JSON格式：
+{"intent": "意图名", "confidence": 0.0-1.0, "reasoning": "判断理由", "requires_confirmation": true/false}"""
+
+
+async def classify_with_llm(
+    text: str,
+    profile_context: Optional[Dict[str, Any]] = None,
+    recent_messages: Optional[List[Dict[str, Any]]] = None,
+) -> IntentResult:
+    """
+    Async LLM-based intent classification for ambiguous cases or
+    context-dependent utterances (ellipsis, anaphora).
+
+    Pass `recent_messages` so the LLM can resolve references like
+    "那个多少卡？" (refers to a meal from the previous turn).
+    """
+    from app.services.llm_service import get_llm_service
+    import json
+
+    llm = get_llm_service()
+    user_prompt = _build_user_prompt(text, profile_context, recent_messages)
+
+    try:
+        result = await llm.generate(LLM_INTENT_SYSTEM_PROMPT, user_prompt)
+        data = json.loads(result)
+
+        intent = _map_string_to_intent(data.get("intent", "general_chat"))
+
+        return IntentResult(
+            intent=intent,
+            confidence=float(data.get("confidence", 0.5)),
+            reasoning=data.get("reasoning", ""),
+            metadata={
+                "requires_confirmation": data.get("requires_confirmation", False),
+                "source": "llm",
+            },
+        )
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        return IntentResult(
+            intent=Intent.GENERAL_CHAT,
+            confidence=0.3,
+            reasoning=f"LLM classification failed: {e}. Defaulting to general_chat.",
+        )
+
+
+def _build_user_prompt(
+    text: str,
+    profile_context: Optional[Dict[str, Any]],
+    recent_messages: Optional[List[Dict[str, Any]]],
+) -> str:
+    """Build the user prompt for LLM intent classification."""
+    parts = [f"用户消息: {text}\n"]
+
+    if profile_context:
+        parts.append("\n用户上下文:")
+        if profile_context.get("primary_goal"):
+            parts.append(f"- 目标: {profile_context['primary_goal']}")
+        if profile_context.get("weight_kg"):
+            parts.append(f"- 当前体重: {profile_context['weight_kg']}kg")
+        if profile_context.get("height_cm"):
+            parts.append(f"- 身高: {profile_context['height_cm']}cm")
+        if profile_context.get("food_preferences"):
+            parts.append(f"- 饮食偏好: {profile_context['food_preferences']}")
+
+    if recent_messages:
+        parts.append("\n最近对话:")
+        for msg in recent_messages[-3:]:
+            role = "用户" if msg.get("role") == "user" else "助手"
+            content = msg.get("content", "")[:100]
+            parts.append(f"- [{role}] {content}")
+
+    return "\n".join(parts)
+
+
+def _map_string_to_intent(intent_str: str) -> Intent:
+    """Map LLM response string to Intent enum."""
+    mapping = {
+        "meal_log": Intent.MEAL_LOG,
+        "profile_update": Intent.PROFILE_UPDATE,
+        "memory_candidate": Intent.MEMORY_CANDIDATE,
+        "dashboard_query": Intent.DASHBOARD_QUERY,
+        "general_chat": Intent.GENERAL_CHAT,
+        "restaurant_search_planned": Intent.RESTAURANT_SEARCH_PLANNED,
+    }
+    return mapping.get(intent_str.lower(), Intent.GENERAL_CHAT)

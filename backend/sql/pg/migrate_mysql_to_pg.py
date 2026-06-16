@@ -76,18 +76,18 @@ def migrate_user_food_profiles(mc, pc):
 
 def migrate_advice_sessions(mc, pc):
     with mc.cursor() as cur:
-        cur.execute("""SELECT id, user_id, title, user_question, context_text, ai_response_json,
-                              scenario, is_training_day, created_at, updated_at, restaurant_context
+        cur.execute("""SELECT id, user_id, title, context_text, ai_response_json,
+                              scenario, is_training_day, created_at, updated_at
                        FROM advice_sessions ORDER BY id""")
         rows = cur.fetchall()
     print(f"advice_sessions: {len(rows)} rows")
     if not rows: return
-    data = [(r[0], r[1], r[2], r[3], r[4], to_jsonb(r[5]), r[6], to_bool(r[7]), r[8], r[9], to_jsonb(r[10])) for r in rows]
+    data = [(r[0], r[1], r[2], r[3], to_jsonb(r[4]), r[5], to_bool(r[6]), r[7], r[8]) for r in rows]
     with pc.cursor() as cur:
         execute_values(cur,
             """INSERT INTO advice_sessions
-               (id, user_id, title, user_question, context_text, ai_response_json,
-                scenario, is_training_day, created_at, updated_at, restaurant_context)
+               (id, user_id, title, context_text, ai_response_json,
+                scenario, is_training_day, created_at, updated_at)
                VALUES %s
                ON CONFLICT (id) DO NOTHING""", data)
         cur.execute("SELECT setval(pg_get_serial_sequence('advice_sessions','id'), (SELECT MAX(id) FROM advice_sessions))")

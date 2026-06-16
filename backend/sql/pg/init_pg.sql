@@ -60,10 +60,54 @@ CREATE TABLE IF NOT EXISTS memory_items (
     -- 向量字段：1024 维，qwen3-embedding:0.6b 输出维度
     embedding           vector(1024),
     embedding_status    VARCHAR(32)  NOT NULL DEFAULT 'pending',
-    embedding_updated_at TIMESTAMPTZ
+    embedding_updated_at TIMESTAMPTZ,
+    -- enum-like guards (mirror MemoryTools.MEMORY_TYPES)
+    CONSTRAINT memory_items_status_chk
+        CHECK (status IN ('active', 'inactive', 'superseded', 'pending')),
+    CONSTRAINT memory_items_embedding_status_chk
+        CHECK (embedding_status IN ('pending', 'ready', 'failed')),
+    CONSTRAINT memory_items_source_chk
+        CHECK (source IN ('manual', 'chat', 'auto_extracted', 'rest_api')),
+    CONSTRAINT memory_items_memory_type_chk
+        CHECK (memory_type IN ('preference', 'allergy_intolerance')),
+    CONSTRAINT memory_items_importance_score_range_chk
+        CHECK (importance_score BETWEEN 1 AND 10),
+    CONSTRAINT memory_items_confidence_score_range_chk
+        CHECK (confidence_score IS NULL OR confidence_score BETWEEN 0.00 AND 1.00),
+    CONSTRAINT memory_items_updated_at_after_created_at_chk
+        CHECK (updated_at >= created_at),
+    CONSTRAINT memory_items_user_type_content_uq
+        UNIQUE (user_id, memory_type, content)
 );
 CREATE INDEX IF NOT EXISTS idx_memory_user_type_status ON memory_items(user_id, memory_type, status);
 CREATE INDEX IF NOT EXISTS idx_memory_user_importance  ON memory_items(user_id, importance_score DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_user_status_last_used
+    ON memory_items(user_id, status, last_used_at DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_memory_embedding_pending
+    ON memory_items(user_id, id)
+    WHERE embedding_status IN ('pending', 'failed');
+CREATE INDEX IF NOT EXISTS idx_memory_source_message
+    ON memory_items(source_message_id)
+    WHERE source_message_id IS NOT NULL;
+
+-- Auto-bump updated_at on UPDATE (covers raw-SQL paths that bypass
+-- SQLAlchemy's onupdate=func.now()). Only fires when the caller did
+-- not explicitly assign a new value.
+CREATE OR REPLACE FUNCTION memory_items_touch_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.updated_at IS NOT DISTINCT FROM OLD.updated_at THEN
+        NEW.updated_at := NOW();
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_memory_items_touch_updated_at ON memory_items;
+CREATE TRIGGER trg_memory_items_touch_updated_at
+    BEFORE UPDATE ON memory_items
+    FOR EACH ROW
+    EXECUTE FUNCTION memory_items_touch_updated_at();
 
 -- meal_logs -------------------------------------------------
 CREATE TABLE IF NOT EXISTS meal_logs (
@@ -94,12 +138,10 @@ CREATE TABLE IF NOT EXISTS advice_sessions (
     id                  BIGSERIAL PRIMARY KEY,
     user_id             BIGINT       NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     title               VARCHAR(255),
-    user_question       TEXT,
     context_text        TEXT,
     ai_response_json    JSONB,
     scenario            VARCHAR(64)  DEFAULT 'OTHER',
     is_training_day     BOOLEAN      DEFAULT FALSE,
-    restaurant_context  JSONB,
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at          TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

@@ -1,12 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
 import { adviceAPI, mealsAPI, profileAPI, memoriesAPI, authAPI } from '../api';
-import { ChatMessage, AgentStep } from '../types';
+import { ChatMessage, AgentStep, ChatAction } from '../types';
 import ChatMessageList from '../components/chat/ChatMessageList';
 import ChatInput from '../components/chat/ChatInput';
 import ChatContextBar from '../components/chat/ChatContextBar';
 import ProfileUpdateConfirmCard from '../components/chat/ProfileUpdateConfirmCard';
 import MemoryConfirmCard from '../components/chat/MemoryConfirmCard';
-import AgentTracePanel from '../components/chat/AgentTracePanel';
 import { useTheme } from '../utils/ThemeContext';
 
 interface TodaySummary {
@@ -37,8 +36,6 @@ export default function Chat() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [todaySummary, setTodaySummary] = useState<TodaySummary | null>(null);
   const [profile, setProfile] = useState<any>(null);
-  const [agentTraceOpen, setAgentTraceOpen] = useState(false);
-  const [traceSteps, setTraceSteps] = useState<AgentStep[]>([]);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -163,8 +160,6 @@ export default function Chat() {
 
     setIsLoading(true);
     setContextCollapsed(true);
-    setTraceSteps([]);
-    setAgentTraceOpen(true);
 
     // Optimistically add user message
     const userMsg: ChatMessage = {
@@ -173,6 +168,64 @@ export default function Chat() {
       content: text.trim(),
     };
     setMessages((prev) => [...prev, userMsg]);
+
+    // 立刻插入一条 streaming 占位 assistant 消息，UI 上渲染思考过程气泡。
+    // 真实 message_id 到了之后再覆盖。
+    const placeholderId = `streaming-${Date.now()}`;
+    const placeholderMsg: ChatMessage = {
+      id: placeholderId,
+      role: 'assistant',
+      content: '',
+      streaming: true,
+      trace: [],
+    };
+    setMessages((prev) => [...prev, placeholderMsg]);
+
+    // 闭包内共享的可变状态：id 在占位 → 真实切换时需要保留引用，
+    // pending action 在 action_pending 早于 message_done 到达时也要保留。
+    let realMessageId: string | null = null;
+    let pendingAction: ChatAction | null = null;
+    let didFinalize = false; // 避免 error + done 各自走一遍产生重复消息
+
+    const appendTraceStep = (step: AgentStep) => {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === placeholderId
+            ? { ...m, trace: [...(m.trace || []), step] }
+            : m
+        )
+      );
+    };
+
+    const finalizeAsError = (text: string) => {
+      if (didFinalize) return;
+      didFinalize = true;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === placeholderId
+            ? {
+                ...m,
+                id: `error-${Date.now()}`,
+                streaming: false,
+                content: text,
+                trace: m.trace, // 保留当时已经发生的 trace，让用户能看到
+              }
+            : m
+        )
+      );
+    };
+
+    const finalizeAsDone = (updates: Partial<ChatMessage>) => {
+      if (didFinalize) return;
+      didFinalize = true;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === placeholderId
+            ? { ...m, ...updates, streaming: false }
+            : m
+        )
+      );
+    };
 
     try {
       // Use SSE endpoint for streaming
@@ -190,7 +243,6 @@ export default function Chat() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-      let currentAiMessage: ChatMessage | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -202,7 +254,7 @@ export default function Chat() {
 
         for (const line of lines) {
           if (line.startsWith('event: ')) {
-            const eventType = line.slice(7).trim();
+            // event: 头部忽略；agent_step 在 data 字段里有 step 标记
             continue;
           }
           if (line.startsWith('data: ')) {
@@ -210,65 +262,33 @@ export default function Chat() {
             try {
               const event = JSON.parse(data);
 
-              // Handle different SSE events
+              // agent_step：后端发回的单条 trace 步骤，追加到占位消息的 trace
               if (event.step) {
-                // Agent step event
-                setTraceSteps(prev => [...prev, event]);
+                appendTraceStep(event as AgentStep);
                 continue;
               }
 
-              if (event.intent) {
-                // Intent detected
-                setTraceSteps(prev => [...prev, {
-                  step: 'intent_detected',
-                  data: { intent: event.intent, confidence: event.confidence },
-                  timestamp: new Date().toISOString()
-                }]);
-              }
-
               if (event.error) {
-                // Server error event
-                const errorMsg: ChatMessage = {
-                  id: `error-${Date.now()}`,
-                  role: 'assistant',
-                  content: event.error || '抱歉，出了点问题。请稍后重试。',
-                };
-                setMessages(prev => [...prev, errorMsg]);
+                finalizeAsError(event.error || '抱歉，出了点问题。请稍后重试。');
                 continue;
               }
 
               if (event.message_id && event.action) {
-                // Action pending - create message with pending action
-                currentAiMessage = {
-                  id: String(event.message_id),
-                  role: 'assistant',
-                  content: '', // Will be filled when message_done
-                  action: {
-                    type: event.action.action_type,
-                    data: event.action.action_data,
-                    status: 'pending'
-                  }
+                // action_pending：先到，缓存起来等 message_done 合并
+                realMessageId = String(event.message_id);
+                pendingAction = {
+                  type: event.action.action_type,
+                  data: event.action.action_data,
+                  status: 'pending' as const,
                 };
-                setMessages(prev => [...prev, currentAiMessage]);
               } else if (event.message_id && event.session_id) {
-                // message_done — always process, whether or not there's a pending action
-                if (!currentAiMessage) {
-                  // No pending action was created, make a new message
-                  currentAiMessage = {
-                    id: String(event.message_id),
-                    role: 'assistant' as const,
-                    content: event.content || '处理中...',
-                  };
-                  setMessages(prev => [...prev, currentAiMessage]);
-                } else {
-                  // Update existing message content
-                  setMessages(prev => prev.map(m =>
-                    m.id === currentAiMessage!.id
-                      ? { ...m, content: event.content || currentAiMessage!.content || '处理中...' }
-                      : m
-                  ));
-                }
-                // Track session_id from server
+                // message_done：把占位消息换成真实 id + content + (可能) action
+                if (!realMessageId) realMessageId = String(event.message_id);
+                finalizeAsDone({
+                  id: realMessageId,
+                  content: event.content || '',
+                  action: pendingAction || undefined,
+                });
                 if (event.session_id) {
                   finalSessionId = event.session_id;
                 }
@@ -313,15 +333,11 @@ export default function Chat() {
       loadTodaySummary();
     } catch (err: any) {
       console.error('API error:', err);
-      const errorMsg: ChatMessage = {
-        id: `error-${Date.now()}`,
-        role: 'assistant',
-        content: err.response?.data?.detail || '抱歉，出了点问题。请稍后重试。',
-      };
-      setMessages((prev) => [...prev, errorMsg]);
+      finalizeAsError(
+        err.response?.data?.detail || '抱歉，出了点问题。请稍后重试。'
+      );
     } finally {
       setIsLoading(false);
-      setAgentTraceOpen(false);
     }
   };
 
@@ -753,13 +769,6 @@ export default function Chat() {
           )}
           <div ref={messagesEndRef} />
         </div>
-
-        {/* Agent Trace Panel - inline above input */}
-        <AgentTracePanel
-          steps={traceSteps}
-          isOpen={agentTraceOpen}
-          onToggle={() => setAgentTraceOpen(!agentTraceOpen)}
-        />
 
         {/* Input */}
         <div className={`border-t px-4 py-4 flex-shrink-0 ${theme === 'dark' ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
